@@ -21,6 +21,7 @@ class AiView extends St.BoxLayout {
             y_expand: true,
             visible: false
         });
+        this.add_style_class_name('search-section-content');
 
         this._settings = settings;
         this._session = new Soup.Session({
