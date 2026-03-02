@@ -22,7 +22,7 @@ export default class AiSearchAssistantExtension extends Extension {
         // Create the Icon
         this._icon = new St.Icon({
             icon_name: 'edit-find-symbolic',
-            style_class: 'system-status-icon ai-search-entry-icon'
+            style_class: 'search-entry-icon ai-search-entry-icon'
         });
 
         // Use primary icon slot so the button does not disappear while typing.
@@ -188,7 +188,7 @@ export default class AiSearchAssistantExtension extends Extension {
                 this._aiButton.add_style_pseudo_class('checked');
             if (this._usesPrimaryIcon)
                 this._icon.add_style_class_name('active');
-            this._icon.icon_name = 'utilities-terminal-symbolic';
+            this._icon.icon_name = 'chat-message-new-symbolic';
             this._ensureAiPrefix();
             console.log('AI Search Assistant: Switched to AI Mode');
         } else {

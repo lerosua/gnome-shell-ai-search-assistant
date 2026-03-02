@@ -16,7 +16,9 @@
 }
 
 .ai-search-entry-icon {
-    padding: 0 6px;
+    icon-size: 1.091em;
+    margin-top: 2px;
+    padding: 0 4px;
 }
 
 .ai-search-entry-icon.active {
