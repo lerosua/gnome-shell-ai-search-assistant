@@ -55,6 +55,10 @@
     spacing: 4px;
 }
 
+.ai-message-body {
+    spacing: 6px;
+}
+
 .ai-message-sender {
     font-weight: bold;
     color: #aaaaaa;
@@ -64,4 +68,51 @@
 .ai-message-text {
     color: #ffffff;
     font-size: 1.1em;
+}
+
+.ai-message-list {
+    color: #ffffff;
+    font-size: 1.05em;
+    margin-left: 8px;
+}
+
+.ai-message-quote {
+    color: #d7e4f4;
+    font-size: 1.05em;
+    padding: 6px 10px;
+    border-left: 3px solid rgba(126, 200, 255, 0.8);
+    background-color: rgba(126, 200, 255, 0.08);
+    border-radius: 8px;
+}
+
+.ai-message-code {
+    color: #e8f4ff;
+    font-size: 1em;
+    padding: 8px 10px;
+    background-color: rgba(18, 26, 38, 0.95);
+    border: 1px solid rgba(126, 200, 255, 0.25);
+    border-radius: 8px;
+    font-family: monospace;
+}
+
+.ai-message-h1 {
+    color: #ffffff;
+    font-size: 1.35em;
+}
+
+.ai-message-h2 {
+    color: #ffffff;
+    font-size: 1.26em;
+}
+
+.ai-message-h3 {
+    color: #ffffff;
+    font-size: 1.2em;
+}
+
+.ai-message-h4,
+.ai-message-h5,
+.ai-message-h6 {
+    color: #ffffff;
+    font-size: 1.12em;
 }

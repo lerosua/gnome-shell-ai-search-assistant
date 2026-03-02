@@ -4,6 +4,7 @@ import Clutter from 'gi://Clutter';
 import Pango from 'gi://Pango';
 import Soup from 'gi://Soup?version=3.0';
 import GLib from 'gi://GLib';
+import Gio from 'gi://Gio';
 
 const DEFAULT_BASE_URL = 'https://yunwu.ai';
 const CHAT_PATH = '/v1/chat/completions';
@@ -65,20 +66,35 @@ class AiView extends St.BoxLayout {
             style_class: 'ai-message-sender'
         });
         
-        const textLabel = new St.Label({
-            text: text,
-            style_class: 'ai-message-text'
-        });
-
-        textLabel.clutter_text.line_wrap = true;
-        const wrapMode = Pango.WrapMode ?? Pango.LineWrapMode;
-        if (wrapMode && wrapMode.WORD_CHAR !== undefined)
-            textLabel.clutter_text.line_wrap_mode = wrapMode.WORD_CHAR;
-
         msgBox.add_child(senderLabel);
-        msgBox.add_child(textLabel);
+
+        const bodyBox = new St.BoxLayout({
+            style_class: 'ai-message-body',
+            vertical: true,
+            x_expand: true
+        });
+        msgBox.add_child(bodyBox);
+
         this._contentBox.add_child(msgBox);
-        
+
+        const message = {
+            sender,
+            bodyBox,
+            text: '',
+            setText: value => {
+                message.text = value ?? '';
+                this._renderMarkdownToBox(bodyBox, message.text);
+            },
+            appendText: value => {
+                if (!value)
+                    return;
+                message.text += value;
+                this._renderMarkdownToBox(bodyBox, message.text);
+            }
+        };
+
+        message.setText(text ?? '');
+
         // Scroll to bottom
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
              const adjustment = this._scrollView.vadjustment ?? this._scrollView.vscroll?.adjustment;
@@ -90,11 +106,11 @@ class AiView extends St.BoxLayout {
              return GLib.SOURCE_REMOVE;
         });
 
-        return textLabel; // Return label for updates
+        return message;
     }
 
     async generateResponse(prompt) {
-        const botLabel = this.addMessage('AI', 'Thinking...');
+        const botMessage = this.addMessage('AI', 'Thinking...');
         const apiKey = this._getApiKey();
         const baseUrl = this._getSettingString('base-url', DEFAULT_BASE_URL);
         const apiUrl = this._buildEndpoint(baseUrl);
@@ -102,7 +118,7 @@ class AiView extends St.BoxLayout {
         const temperature = this._getSettingDouble('temperature', DEFAULT_TEMPERATURE);
 
         if (!apiKey) {
-            botLabel.set_text('Error: Missing API key in settings (api-key) or YUNWU_API_KEY');
+            botMessage.setText('Error: Missing API key in settings (api-key) or YUNWU_API_KEY');
             return;
         }
 
@@ -116,38 +132,323 @@ class AiView extends St.BoxLayout {
             messages: [
                 {'role': 'user', 'content': prompt}
             ],
-            temperature
+            temperature,
+            stream: true
         });
         
         const bytes = new GLib.Bytes(body);
         msg.set_request_body_from_bytes('application/json', bytes);
 
         try {
-            const responseBytes = await this._session.send_and_read_async(
-                msg,
-                GLib.PRIORITY_DEFAULT,
-                null
-            );
+            const responseStream = await this._session.send_async(msg, GLib.PRIORITY_DEFAULT, null);
             const statusCode = msg.status_code ?? msg.get_status?.() ?? 0;
-            const responseText = new TextDecoder('utf-8').decode(responseBytes.get_data());
+            const contentType = (msg.response_headers.get_one('Content-Type') ?? '').toLowerCase();
 
             if (statusCode < 200 || statusCode >= 300) {
-                botLabel.set_text(`Error (${statusCode}): ${responseText}`);
+                const responseText = await this._readWholeStream(responseStream);
+                botMessage.setText(`Error (${statusCode}): ${responseText}`);
                 return;
             }
 
-            const responseJson = JSON.parse(responseText);
-            const content = responseJson.choices?.[0]?.message?.content?.trim();
-
-            if (!content) {
-                botLabel.set_text('Error: Empty response from model');
-                return;
-            }
-
-            botLabel.set_text(content);
+            const streamResult = await this._readStreamResponse(responseStream, contentType, botMessage);
+            const content = streamResult.trim();
+            if (!content)
+                botMessage.setText('Error: Empty response from model');
             
         } catch (e) {
-            botLabel.set_text(`Error: ${e.message}`);
+            botMessage.setText(`Error: ${e.message}`);
+        }
+    }
+
+    async _readStreamResponse(responseStream, contentType, botMessage) {
+        const isSse = contentType.includes('text/event-stream');
+        if (!isSse)
+            return this._readJsonResponse(responseStream, botMessage);
+
+        let buffer = '';
+        let fullText = '';
+        let rawText = '';
+        const decoder = new TextDecoder('utf-8');
+
+        while (true) {
+            const bytes = await responseStream.read_bytes_async(4096, GLib.PRIORITY_DEFAULT, null);
+            if (bytes.get_size() === 0)
+                break;
+
+            const chunk = decoder.decode(bytes.get_data(), {stream: true});
+            rawText += chunk;
+            buffer += chunk.replace(/\r\n/g, '\n');
+
+            while (true) {
+                const boundary = buffer.indexOf('\n\n');
+                if (boundary === -1)
+                    break;
+
+                const block = buffer.slice(0, boundary);
+                buffer = buffer.slice(boundary + 2);
+                const update = this._extractStreamDelta(block);
+
+                if (update.done)
+                    return fullText;
+
+                if (!update.delta)
+                    continue;
+
+                if (fullText.length === 0)
+                    botMessage.setText('');
+
+                fullText += update.delta;
+                botMessage.setText(fullText);
+            }
+        }
+
+        if (buffer.trim().length > 0) {
+            const update = this._extractStreamDelta(buffer);
+            if (update.delta) {
+                if (fullText.length === 0)
+                    botMessage.setText('');
+                fullText += update.delta;
+                botMessage.setText(fullText);
+            }
+        }
+
+        if (fullText.length > 0)
+            return fullText;
+
+        if (rawText.trim().startsWith('{')) {
+            const parsed = this._extractContentFromJson(rawText);
+            botMessage.setText(parsed);
+            return parsed;
+        }
+
+        return '';
+    }
+
+    async _readJsonResponse(responseStream, botMessage) {
+        const responseText = await this._readWholeStream(responseStream);
+        const content = this._extractContentFromJson(responseText);
+        botMessage.setText(content);
+        return content;
+    }
+
+    _extractContentFromJson(responseText) {
+        const responseJson = JSON.parse(responseText);
+        const choice = responseJson.choices?.[0] ?? null;
+        const direct = choice?.message?.content ?? choice?.delta?.content ?? '';
+
+        if (Array.isArray(direct))
+            return direct.map(part => part?.text ?? '').join('').trim();
+
+        return String(direct).trim();
+    }
+
+    _extractStreamDelta(block) {
+        const lines = block.split('\n');
+        const data = [];
+
+        for (const line of lines) {
+            if (!line.startsWith('data:'))
+                continue;
+            data.push(line.slice(5).trimStart());
+        }
+
+        if (data.length === 0)
+            return {done: false, delta: ''};
+
+        const payload = data.join('\n').trim();
+        if (payload.length === 0)
+            return {done: false, delta: ''};
+
+        if (payload === '[DONE]')
+            return {done: true, delta: ''};
+
+        try {
+            const parsed = JSON.parse(payload);
+            const choice = parsed.choices?.[0] ?? null;
+            let delta = choice?.delta?.content ?? choice?.message?.content ?? '';
+
+            if (Array.isArray(delta))
+                delta = delta.map(part => part?.text ?? '').join('');
+
+            return {done: false, delta: String(delta)};
+        } catch (_e) {
+            return {done: false, delta: ''};
+        }
+    }
+
+    async _readWholeStream(stream) {
+        const decoder = new TextDecoder('utf-8');
+        let text = '';
+
+        while (true) {
+            const bytes = await stream.read_bytes_async(4096, GLib.PRIORITY_DEFAULT, null);
+            if (bytes.get_size() === 0)
+                break;
+            text += decoder.decode(bytes.get_data(), {stream: true});
+        }
+
+        return text.trim();
+    }
+
+    _renderMarkdownToBox(container, markdown) {
+        for (const child of container.get_children())
+            child.destroy();
+
+        const lines = String(markdown ?? '').replace(/\r\n/g, '\n').split('\n');
+        let paragraph = [];
+        let inCode = false;
+        let codeLines = [];
+
+        const flushParagraph = () => {
+            if (paragraph.length === 0)
+                return;
+            const text = paragraph.join(' ').trim();
+            paragraph = [];
+            if (text.length > 0)
+                container.add_child(this._createMarkupLabel('ai-message-text', this._inlineMarkdownToMarkup(text)));
+        };
+
+        const flushCode = () => {
+            if (codeLines.length === 0)
+                return;
+            const codeText = codeLines.join('\n');
+            codeLines = [];
+            const escaped = GLib.markup_escape_text(codeText, -1);
+            container.add_child(this._createMarkupLabel('ai-message-code', `<tt>${escaped}</tt>`));
+        };
+
+        for (const line of lines) {
+            const codeFence = line.trim().startsWith('```');
+            if (codeFence) {
+                flushParagraph();
+                if (inCode) {
+                    flushCode();
+                    inCode = false;
+                } else {
+                    inCode = true;
+                }
+                continue;
+            }
+
+            if (inCode) {
+                codeLines.push(line);
+                continue;
+            }
+
+            if (line.trim().length === 0) {
+                flushParagraph();
+                continue;
+            }
+
+            const heading = line.match(/^(#{1,6})\s+(.+)$/);
+            if (heading) {
+                flushParagraph();
+                const level = heading[1].length;
+                const text = this._inlineMarkdownToMarkup(heading[2].trim());
+                container.add_child(this._createMarkupLabel(`ai-message-h${level}`, `<b>${text}</b>`));
+                continue;
+            }
+
+            const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
+            if (unordered) {
+                flushParagraph();
+                const item = this._inlineMarkdownToMarkup(unordered[1].trim());
+                container.add_child(this._createMarkupLabel('ai-message-list', `- ${item}`));
+                continue;
+            }
+
+            const ordered = line.match(/^\s*\d+\.\s+(.+)$/);
+            if (ordered) {
+                flushParagraph();
+                const item = this._inlineMarkdownToMarkup(ordered[1].trim());
+                container.add_child(this._createMarkupLabel('ai-message-list', `1. ${item}`));
+                continue;
+            }
+
+            const quote = line.match(/^>\s+(.+)$/);
+            if (quote) {
+                flushParagraph();
+                const item = this._inlineMarkdownToMarkup(quote[1].trim());
+                container.add_child(this._createMarkupLabel('ai-message-quote', item));
+                continue;
+            }
+
+            paragraph.push(line);
+        }
+
+        flushParagraph();
+        if (inCode)
+            flushCode();
+    }
+
+    _createMarkupLabel(styleClass, markup) {
+        const label = new St.Label({
+            style_class: styleClass,
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START
+        });
+
+        label.clutter_text.line_wrap = true;
+        const wrapMode = Pango.WrapMode ?? Pango.LineWrapMode;
+        if (wrapMode && wrapMode.WORD_CHAR !== undefined)
+            label.clutter_text.line_wrap_mode = wrapMode.WORD_CHAR;
+
+        try {
+            label.clutter_text.connect('activate-link', (_text, uri) => {
+                this._openUri(uri);
+                return true;
+            });
+        } catch (_e) {
+            // Some shell versions may not expose activate-link.
+        }
+
+        label.clutter_text.set_markup(markup);
+        return label;
+    }
+
+    _inlineMarkdownToMarkup(text) {
+        const parts = String(text ?? '').split(/(`[^`]*`)/g);
+        let output = '';
+
+        for (const part of parts) {
+            if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
+                const code = GLib.markup_escape_text(part.slice(1, -1), -1);
+                output += `<tt>${code}</tt>`;
+                continue;
+            }
+
+            const links = [];
+            let linkInput = part.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_m, labelText, urlText) => {
+                const token = `@@LINK${links.length}@@`;
+                const safeLabel = GLib.markup_escape_text(labelText, -1);
+                const safeUrl = GLib.markup_escape_text(urlText, -1);
+                links.push(`<a href="${safeUrl}">${safeLabel}</a>`);
+                return token;
+            });
+
+            let escaped = GLib.markup_escape_text(linkInput, -1);
+            escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+            escaped = escaped.replace(/__([^_]+)__/g, '<b>$1</b>');
+            escaped = escaped.replace(/\*([^*]+)\*/g, '<i>$1</i>');
+            escaped = escaped.replace(/_([^_]+)_/g, '<i>$1</i>');
+
+            for (let i = 0; i < links.length; i++)
+                escaped = escaped.replace(`@@LINK${i}@@`, links[i]);
+
+            output += escaped;
+        }
+
+        return output;
+    }
+
+    _openUri(uri) {
+        if (!uri || !/^https?:\/\//i.test(uri))
+            return;
+
+        try {
+            Gio.AppInfo.launch_default_for_uri(uri, null);
+        } catch (e) {
+            console.error(`AI Search Assistant: Failed to open URI ${uri}`, e);
         }
     }
 

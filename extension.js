@@ -12,7 +12,7 @@ export default class AiSearchAssistantExtension extends Extension {
         this._settings = this.getSettings();
         this._searchEntry = Main.overview.searchEntry;
 
-        this._usesSecondaryIcon = false;
+        this._usesPrimaryIcon = false;
 
         // Create the Icon
         this._icon = new St.Icon({
@@ -20,19 +20,15 @@ export default class AiSearchAssistantExtension extends Extension {
             style_class: 'system-status-icon ai-search-entry-icon'
         });
 
-        // GNOME 46+ friendly path: use entry secondary icon slot.
-        if (typeof this._searchEntry.set_secondary_icon === 'function') {
-            this._usesSecondaryIcon = true;
-            this._searchEntry.set_secondary_icon(this._icon);
-            this._icon.reactive = true;
-            this._icon.track_hover = true;
-            this._icon.can_focus = true;
-            this._iconButtonSignal = this._icon.connect('button-press-event', () => {
+        // Use primary icon slot so the button does not disappear while typing.
+        if (typeof this._searchEntry.set_primary_icon === 'function') {
+            this._usesPrimaryIcon = true;
+            this._searchEntry.set_primary_icon(this._icon);
+            this._iconButtonSignal = this._searchEntry.connect('primary-icon-clicked', () => {
                 this._toggleMode();
-                return Clutter.EVENT_STOP;
             });
         } else {
-            // Fallback for older shells.
+            // Fallback for shells without icon-slot API.
             this._aiButton = new St.Button({
                 style_class: 'search-entry-ai-button',
                 can_focus: true,
@@ -45,21 +41,43 @@ export default class AiSearchAssistantExtension extends Extension {
             this._aiButtonSignal = this._aiButton.connect('clicked', () => {
                 this._toggleMode();
             });
-            this._searchEntry.add_child(this._aiButton);
+
+            const searchEntryParent = this._searchEntry.get_parent?.();
+            if (searchEntryParent)
+                searchEntryParent.add_child(this._aiButton);
+            else
+                this._searchEntry.add_child(this._aiButton);
         }
 
-        // Listen for Enter (Activate) on Search Entry
-        this._entrySignal = this._searchEntry.clutter_text.connect('activate', () => {
-            if (this._isAiMode) {
-                const text = this._searchEntry.get_text();
-                if (text && text.trim().length > 0) {
-                    this._aiView.addMessage('You', text);
-                    this._aiView.generateResponse(text);
-                    this._searchEntry.set_text(''); // Clear input
+        // Intercept Enter at capture phase while in AI mode.
+        this._stageSignal = global.stage.connect('captured-event', (_actor, event) => {
+            if (!this._isAiMode)
+                return Clutter.EVENT_PROPAGATE;
+
+            const eventType = event.type ? event.type() : event.type;
+            if (eventType !== Clutter.EventType.KEY_PRESS)
+                return Clutter.EVENT_PROPAGATE;
+
+            const key = event.get_key_symbol();
+            if (key !== Clutter.KEY_Return && key !== Clutter.KEY_KP_Enter)
+                return Clutter.EVENT_PROPAGATE;
+
+            const focus = global.stage.get_key_focus?.();
+            const searchText = this._searchEntry?.clutter_text ?? null;
+            let isSearchFocus = false;
+            for (let actor = focus; actor; actor = actor.get_parent?.()) {
+                if (actor === searchText || actor === this._searchEntry) {
+                    isSearchFocus = true;
+                    break;
                 }
-                return Clutter.EVENT_STOP;
             }
-            return Clutter.EVENT_PROPAGATE;
+
+            if (!isSearchFocus)
+                return Clutter.EVENT_PROPAGATE;
+
+            this._submitAiPrompt();
+            console.log('AI Search Assistant: Enter intercepted in AI mode');
+            return Clutter.EVENT_STOP;
         });
 
         // Init AI View
@@ -79,14 +97,25 @@ export default class AiSearchAssistantExtension extends Extension {
             }
 
             if (overviewControls) {
-                 overviewControls.add_child(this._aiView);
-                 
-                 // Try to find search results to hide them
-                 if (overviewControls._searchController) {
+                 // Try to find search results first so we can mount AI view in the same container.
+                 if (overviewControls._searchController)
                      this._searchResultsView = overviewControls._searchController._searchResults;
-                 } else if (overviewControls._searchController) {
-                      // Sometimes it might be directly on controls? Unlikely.
+
+                 const searchActor = this._searchResultsView ? (this._searchResultsView.actor || this._searchResultsView) : null;
+                 const searchParent = searchActor?.get_parent?.() ?? null;
+
+                 if (searchParent) {
+                     this._searchContainer = searchParent;
+                     this._searchContainer.add_child(this._aiView);
+                 } else {
+                     // Fallback if shell internals differ.
+                     overviewControls.add_child(this._aiView);
                  }
+
+                 this._aiView.visible = false;
+                 this._aiView.reactive = true;
+                 this._aiView.x_expand = true;
+                 this._aiView.y_expand = true;
             } else {
                  console.warn('AI Search Assistant: Could not find overviewControls, AI view might not show.');
             }
@@ -103,46 +132,63 @@ export default class AiSearchAssistantExtension extends Extension {
         if (this._isAiMode) {
             if (this._aiButton)
                 this._aiButton.add_style_pseudo_class('checked');
-            if (this._usesSecondaryIcon)
+            if (this._usesPrimaryIcon)
                 this._icon.add_style_class_name('active');
-            this._icon.icon_name = 'system-search-symbolic'; // Switch icon to indicate active state or change functionality
+            this._icon.icon_name = 'utilities-terminal-symbolic';
             console.log('AI Search Assistant: Switched to AI Mode');
             
             // Show AI View, Hide Search Results
             this._aiView.visible = true;
-            if (searchActor) searchActor.opacity = 0; // Hide but keep layout or use visible=false
+            if (searchActor) {
+                searchActor.visible = false;
+                searchActor.reactive = false;
+            }
             
         } else {
             if (this._aiButton)
                 this._aiButton.remove_style_pseudo_class('checked');
-            if (this._usesSecondaryIcon)
+            if (this._usesPrimaryIcon)
                 this._icon.remove_style_class_name('active');
             this._icon.icon_name = 'edit-find-symbolic';
             console.log('AI Search Assistant: Switched to Search Mode');
             
             // Hide AI View, Show Search Results
             this._aiView.visible = false;
-            if (searchActor) searchActor.opacity = 255;
+            if (searchActor) {
+                searchActor.visible = true;
+                searchActor.reactive = true;
+            }
         }
+    }
+
+    _submitAiPrompt() {
+        const text = this._searchEntry?.get_text?.() ?? '';
+        const prompt = text.trim();
+
+        if (prompt.length === 0)
+            return;
+
+        this._aiView.addMessage('You', prompt);
+        this._aiView.generateResponse(prompt);
+        this._searchEntry.set_text('');
     }
 
     disable() {
         console.log('AI Search Assistant: Disabling...');
 
-        if (this._entrySignal) {
-            if (this._searchEntry && this._searchEntry.clutter_text) {
-                this._searchEntry.clutter_text.disconnect(this._entrySignal);
-            }
-            this._entrySignal = null;
+        if (this._stageSignal) {
+            if (global.stage)
+                global.stage.disconnect(this._stageSignal);
+            this._stageSignal = null;
         }
 
-        if (this._iconButtonSignal && this._icon) {
-            this._icon.disconnect(this._iconButtonSignal);
+        if (this._iconButtonSignal && this._searchEntry) {
+            this._searchEntry.disconnect(this._iconButtonSignal);
             this._iconButtonSignal = null;
         }
 
-        if (this._usesSecondaryIcon && this._searchEntry && typeof this._searchEntry.set_secondary_icon === 'function') {
-            this._searchEntry.set_secondary_icon(null);
+        if (this._usesPrimaryIcon && this._searchEntry && typeof this._searchEntry.set_primary_icon === 'function') {
+            this._searchEntry.set_primary_icon(null);
         }
 
         if (this._aiButton) {
@@ -169,14 +215,18 @@ export default class AiSearchAssistantExtension extends Extension {
 
         if (overviewControls && overviewControls._searchController && overviewControls._searchController._searchResults) {
              const searchActor = overviewControls._searchController._searchResults.actor || overviewControls._searchController._searchResults;
-             if (searchActor) searchActor.opacity = 255;
+             if (searchActor) {
+                 searchActor.visible = true;
+                 searchActor.reactive = true;
+             }
         }
 
         this._searchEntry = null;
         this._searchResultsView = null;
+        this._searchContainer = null;
         this._settings = null;
         this._isAiMode = false;
-        this._usesSecondaryIcon = false;
+        this._usesPrimaryIcon = false;
         this._icon = null;
     }
 }
