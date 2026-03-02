@@ -1,0 +1,59 @@
+/* Basic stylesheet for AI Search Assistant */
+
+.search-entry-ai-button {
+    margin-left: 6px;
+    padding: 0 8px;
+    border-radius: 99px;
+}
+
+.search-entry-ai-button:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.search-entry-ai-button:checked {
+    background-color: rgba(255, 255, 255, 0.2);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+}
+
+/* AI View Container */
+.ai-view-container {
+    background-color: rgba(0, 0, 0, 0.7); /* Semi-transparent black */
+    border-radius: 24px;
+    margin: 20px;
+    padding: 24px;
+    spacing: 12px;
+}
+
+.ai-view-header {
+    font-size: 1.5em;
+    font-weight: bold;
+    color: #ffffff;
+    padding-bottom: 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.ai-view-scroll {
+    padding: 10px;
+}
+
+.ai-view-content {
+    spacing: 10px;
+}
+
+.ai-message-box {
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 12px;
+    padding: 12px;
+    spacing: 4px;
+}
+
+.ai-message-sender {
+    font-weight: bold;
+    color: #aaaaaa;
+    font-size: 0.9em;
+}
+
+.ai-message-text {
+    color: #ffffff;
+    font-size: 1.1em;
+}

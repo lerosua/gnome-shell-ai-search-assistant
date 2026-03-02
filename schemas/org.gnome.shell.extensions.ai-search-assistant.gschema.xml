@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.ai-search-assistant" path="/org/gnome/shell/extensions/ai-search-assistant/">
+    <key name="api-key" type="s">
+      <default>""</default>
+      <summary>API key for chat provider</summary>
+      <description>Bearer token used for chat completion API requests.</description>
+    </key>
+    <key name="base-url" type="s">
+      <default>"https://yunwu.ai"</default>
+      <summary>Provider base URL</summary>
+      <description>Base URL for OpenAI-compatible chat APIs. The extension appends /v1/chat/completions.</description>
+    </key>
+    <key name="model" type="s">
+      <default>"gpt-3.5-turbo"</default>
+      <summary>Chat model name</summary>
+      <description>Model identifier sent in requests.</description>
+    </key>
+    <key name="temperature" type="d">
+      <default>0.7</default>
+      <summary>Sampling temperature</summary>
+      <description>Controls randomness in model responses.</description>
+    </key>
+  </schema>
+</schemalist>

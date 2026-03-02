@@ -1,0 +1,15 @@
+{
+    "name": "AI Search Assistant",
+    "description": "Adds an AI button to the GNOME Shell search bar.",
+    "uuid": "ai-search-assistant@lerosua",
+    "shell-version": [
+        "45",
+        "46",
+        "47",
+        "48",
+        "49"
+    ],
+    "settings-schema": "org.gnome.shell.extensions.ai-search-assistant",
+    "url": "",
+    "version": 1
+}
