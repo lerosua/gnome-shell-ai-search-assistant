@@ -12,30 +12,41 @@ export default class AiSearchAssistantExtension extends Extension {
         this._settings = this.getSettings();
         this._searchEntry = Main.overview.searchEntry;
 
-        // Create the AI Button
-        this._aiButton = new St.Button({
-            style_class: 'search-entry-ai-button',
-            can_focus: true,
-            track_hover: true,
-            accessible_name: 'Toggle AI Mode',
-            y_align: Clutter.ActorAlign.CENTER,
-            x_align: Clutter.ActorAlign.CENTER
-        });
+        this._usesSecondaryIcon = false;
 
         // Create the Icon
         this._icon = new St.Icon({
             icon_name: 'edit-find-symbolic',
-            style_class: 'system-status-icon'
-        });
-        this._aiButton.set_child(this._icon);
-
-        // Add Click Listener
-        this._aiButtonSignal = this._aiButton.connect('clicked', () => {
-            this._toggleMode();
+            style_class: 'system-status-icon ai-search-entry-icon'
         });
 
-        // Add to Search Entry
-        this._searchEntry.add_child(this._aiButton);
+        // GNOME 46+ friendly path: use entry secondary icon slot.
+        if (typeof this._searchEntry.set_secondary_icon === 'function') {
+            this._usesSecondaryIcon = true;
+            this._searchEntry.set_secondary_icon(this._icon);
+            this._icon.reactive = true;
+            this._icon.track_hover = true;
+            this._icon.can_focus = true;
+            this._iconButtonSignal = this._icon.connect('button-press-event', () => {
+                this._toggleMode();
+                return Clutter.EVENT_STOP;
+            });
+        } else {
+            // Fallback for older shells.
+            this._aiButton = new St.Button({
+                style_class: 'search-entry-ai-button',
+                can_focus: true,
+                track_hover: true,
+                accessible_name: 'Toggle AI Mode',
+                y_align: Clutter.ActorAlign.CENTER,
+                x_align: Clutter.ActorAlign.CENTER,
+            });
+            this._aiButton.set_child(this._icon);
+            this._aiButtonSignal = this._aiButton.connect('clicked', () => {
+                this._toggleMode();
+            });
+            this._searchEntry.add_child(this._aiButton);
+        }
 
         // Listen for Enter (Activate) on Search Entry
         this._entrySignal = this._searchEntry.clutter_text.connect('activate', () => {
@@ -90,7 +101,10 @@ export default class AiSearchAssistantExtension extends Extension {
         const searchActor = this._searchResultsView ? (this._searchResultsView.actor || this._searchResultsView) : null;
 
         if (this._isAiMode) {
-            this._aiButton.add_style_pseudo_class('checked');
+            if (this._aiButton)
+                this._aiButton.add_style_pseudo_class('checked');
+            if (this._usesSecondaryIcon)
+                this._icon.add_style_class_name('active');
             this._icon.icon_name = 'system-search-symbolic'; // Switch icon to indicate active state or change functionality
             console.log('AI Search Assistant: Switched to AI Mode');
             
@@ -99,7 +113,10 @@ export default class AiSearchAssistantExtension extends Extension {
             if (searchActor) searchActor.opacity = 0; // Hide but keep layout or use visible=false
             
         } else {
-            this._aiButton.remove_style_pseudo_class('checked');
+            if (this._aiButton)
+                this._aiButton.remove_style_pseudo_class('checked');
+            if (this._usesSecondaryIcon)
+                this._icon.remove_style_class_name('active');
             this._icon.icon_name = 'edit-find-symbolic';
             console.log('AI Search Assistant: Switched to Search Mode');
             
@@ -117,6 +134,15 @@ export default class AiSearchAssistantExtension extends Extension {
                 this._searchEntry.clutter_text.disconnect(this._entrySignal);
             }
             this._entrySignal = null;
+        }
+
+        if (this._iconButtonSignal && this._icon) {
+            this._icon.disconnect(this._iconButtonSignal);
+            this._iconButtonSignal = null;
+        }
+
+        if (this._usesSecondaryIcon && this._searchEntry && typeof this._searchEntry.set_secondary_icon === 'function') {
+            this._searchEntry.set_secondary_icon(null);
         }
 
         if (this._aiButton) {
@@ -150,5 +176,7 @@ export default class AiSearchAssistantExtension extends Extension {
         this._searchResultsView = null;
         this._settings = null;
         this._isAiMode = false;
+        this._usesSecondaryIcon = false;
+        this._icon = null;
     }
 }

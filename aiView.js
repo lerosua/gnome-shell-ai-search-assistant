@@ -81,10 +81,11 @@ class AiView extends St.BoxLayout {
         
         // Scroll to bottom
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
-             const vscroll = this._scrollView.get_vscroll_bar();
-             if (vscroll) {
-                 const adjustment = vscroll.get_adjustment();
-                 adjustment.set_value(adjustment.get_upper());
+             const adjustment = this._scrollView.vadjustment ?? this._scrollView.vscroll?.adjustment;
+             if (adjustment) {
+                 const upper = adjustment.upper ?? adjustment.get_upper?.() ?? 0;
+                 const pageSize = adjustment.page_size ?? adjustment.get_page_size?.() ?? 0;
+                 adjustment.set_value(Math.max(0, upper - pageSize));
              }
              return GLib.SOURCE_REMOVE;
         });
