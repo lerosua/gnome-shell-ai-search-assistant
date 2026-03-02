@@ -1,5 +1,6 @@
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
+import GLib from 'gi://GLib';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import { AiView } from './aiView.js';
@@ -9,8 +10,10 @@ export default class AiSearchAssistantExtension extends Extension {
         console.log('AI Search Assistant: Enabling...');
         
         this._isAiMode = false;
+        this._isSubmitting = false;
         this._settings = this.getSettings();
         this._searchEntry = Main.overview.searchEntry;
+        this._searchTextActor = this._searchEntry?.clutter_text ?? null;
 
         this._usesPrimaryIcon = false;
 
@@ -62,6 +65,9 @@ export default class AiSearchAssistantExtension extends Extension {
             if (key !== Clutter.KEY_Return && key !== Clutter.KEY_KP_Enter)
                 return Clutter.EVENT_PROPAGATE;
 
+            if (this._isSubmitting)
+                return Clutter.EVENT_STOP;
+
             const focus = global.stage.get_key_focus?.();
             const searchText = this._searchEntry?.clutter_text ?? null;
             let isSearchFocus = false;
@@ -80,45 +86,78 @@ export default class AiSearchAssistantExtension extends Extension {
             return Clutter.EVENT_STOP;
         });
 
+        // Keep AI result UI visible in AI mode even when search text is cleared.
+        if (this._searchTextActor?.connect) {
+            this._searchTextSignal = this._searchTextActor.connect('text-changed', () => {
+                if (!this._isAiMode)
+                    return;
+
+                GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                    this._syncModeVisibility();
+                    return GLib.SOURCE_REMOVE;
+                });
+            });
+        }
+
         // Init AI View
         this._aiView = new AiView(this._settings);
         
-        // Locate Search Results Container
-        // Note: In GNOME 45+, the structure is different.
-        // We try to find the controls and search results view.
+        // Locate Search Results Container and attach AI view.
+        // Keep AI results in the same visual slot as native search results
+        // (below the search entry), so it never covers the search bar.
         try {
             let overviewControls = null;
             if (Main.overview._controls) {
-                 // GNOME 45+
                  overviewControls = Main.overview._controls;
             } else if (Main.overview._overview && Main.overview._overview.controls) {
-                 // Older versions
                  overviewControls = Main.overview._overview.controls;
             }
 
-            if (overviewControls) {
-                 // Try to find search results first so we can mount AI view in the same container.
-                 if (overviewControls._searchController)
-                     this._searchResultsView = overviewControls._searchController._searchResults;
+            this._searchResultsView = null;
+            this._searchResultsActor = null;
+            this._aiViewParent = null;
 
-                 const searchActor = this._searchResultsView ? (this._searchResultsView.actor || this._searchResultsView) : null;
-                 const searchParent = searchActor?.get_parent?.() ?? null;
-
-                 if (searchParent) {
-                     this._searchContainer = searchParent;
-                     this._searchContainer.add_child(this._aiView);
-                 } else {
-                     // Fallback if shell internals differ.
-                     overviewControls.add_child(this._aiView);
-                 }
-
-                 this._aiView.visible = false;
-                 this._aiView.reactive = true;
-                 this._aiView.x_expand = true;
-                 this._aiView.y_expand = true;
-            } else {
-                 console.warn('AI Search Assistant: Could not find overviewControls, AI view might not show.');
+            if (overviewControls?._searchController) {
+                const sr = overviewControls._searchController._searchResults;
+                this._searchResultsView = sr;
+                this._searchResultsActor = sr?.actor ?? sr;
             }
+
+            const srParent = this._searchResultsActor?.get_parent?.();
+            if (srParent && this._searchResultsActor) {
+                srParent.add_child(this._aiView);
+                this._aiView.add_constraint(new Clutter.BindConstraint({
+                    source: this._searchResultsActor,
+                    coordinate: Clutter.BindCoordinate.POSITION,
+                    offset: 0,
+                }));
+                this._aiView.add_constraint(new Clutter.BindConstraint({
+                    source: this._searchResultsActor,
+                    coordinate: Clutter.BindCoordinate.SIZE,
+                    offset: 0,
+                }));
+                this._aiViewParent = srParent;
+                console.log('AI Search Assistant: AI view attached as sibling of search results');
+            } else {
+                // Last-resort fallback for unusual shell internals.
+                const overviewGroup = Main.overview._overview ?? Main.layoutManager.overviewGroup;
+                if (overviewGroup) {
+                    overviewGroup.add_child(this._aiView);
+                    this._aiView.add_constraint(new Clutter.BindConstraint({
+                        source: overviewGroup,
+                        coordinate: Clutter.BindCoordinate.ALL,
+                        offset: 0,
+                    }));
+                    this._aiViewParent = overviewGroup;
+                    console.warn('AI Search Assistant: Falling back to overview overlay attachment');
+                } else {
+                    console.warn('AI Search Assistant: Could not find a suitable parent for AI view');
+                }
+            }
+
+            this._aiView.visible = false;
+            this._aiView.reactive = true;
+            this._raiseAiView();
         } catch (e) {
             console.error('AI Search Assistant: Error attaching AI view', e);
         }
@@ -126,8 +165,6 @@ export default class AiSearchAssistantExtension extends Extension {
 
     _toggleMode() {
         this._isAiMode = !this._isAiMode;
-        
-        const searchActor = this._searchResultsView ? (this._searchResultsView.actor || this._searchResultsView) : null;
 
         if (this._isAiMode) {
             if (this._aiButton)
@@ -136,14 +173,6 @@ export default class AiSearchAssistantExtension extends Extension {
                 this._icon.add_style_class_name('active');
             this._icon.icon_name = 'utilities-terminal-symbolic';
             console.log('AI Search Assistant: Switched to AI Mode');
-            
-            // Show AI View, Hide Search Results
-            this._aiView.visible = true;
-            if (searchActor) {
-                searchActor.visible = false;
-                searchActor.reactive = false;
-            }
-            
         } else {
             if (this._aiButton)
                 this._aiButton.remove_style_pseudo_class('checked');
@@ -151,26 +180,113 @@ export default class AiSearchAssistantExtension extends Extension {
                 this._icon.remove_style_class_name('active');
             this._icon.icon_name = 'edit-find-symbolic';
             console.log('AI Search Assistant: Switched to Search Mode');
-            
-            // Hide AI View, Show Search Results
-            this._aiView.visible = false;
-            if (searchActor) {
-                searchActor.visible = true;
-                searchActor.reactive = true;
+        }
+
+        this._syncModeVisibility();
+    }
+
+    async _submitAiPrompt() {
+        const searchText = this._searchEntry?.clutter_text ?? null;
+        const text = searchText?.get_text?.() ?? this._searchEntry?.get_text?.() ?? '';
+        const prompt = String(text).trim();
+
+        if (prompt.length === 0 || this._isSubmitting)
+            return;
+
+        this._isSubmitting = true;
+
+        if (this._isAiMode && this._aiView)
+            this._aiView.visible = true;
+
+        console.log(`AI Search Assistant: Submitting prompt (${prompt.length} chars): ${prompt.slice(0, 80)}`);
+
+        this._aiView.addMessage('You', prompt);
+
+        if (searchText?.set_text)
+            searchText.set_text('');
+        if (this._searchEntry?.set_text)
+            this._searchEntry.set_text('');
+
+        // GNOME Shell's search controller reacts to text changes and hides
+        // the search results container when the entry becomes empty.  Since
+        // aiView lives inside that container we must re-assert visibility
+        // after the search controller has finished processing the empty text.
+        GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            if (this._isAiMode && this._aiView) {
+                this._aiView.visible = true;
+                this._raiseAiView();
+                // Also ensure the parent container stays visible
+                const parent = this._aiView.get_parent?.();
+                if (parent && !parent.visible)
+                    parent.visible = true;
+                // Keep native search results allocated, but visually hidden,
+                // so the AI view can keep the same size as search results.
+                if (this._searchResultsActor) {
+                    this._searchResultsActor.visible = true;
+                    this._searchResultsActor.opacity = 0;
+                    this._searchResultsActor.reactive = false;
+                }
             }
+            return GLib.SOURCE_REMOVE;
+        });
+
+        try {
+            await this._aiView.generateResponse(prompt);
+        } finally {
+            this._isSubmitting = false;
         }
     }
 
-    _submitAiPrompt() {
-        const text = this._searchEntry?.get_text?.() ?? '';
-        const prompt = text.trim();
+    _syncModeVisibility() {
+        const searchActor = this._searchResultsActor ?? null;
 
-        if (prompt.length === 0)
+        if (!this._aiView)
             return;
 
-        this._aiView.addMessage('You', prompt);
-        this._aiView.generateResponse(prompt);
-        this._searchEntry.set_text('');
+        if (this._isAiMode) {
+            this._aiView.visible = true;
+            this._aiView.reactive = true;
+            this._raiseAiView();
+
+            const parent = this._aiView.get_parent?.();
+            if (parent && !parent.visible)
+                parent.visible = true;
+
+            if (searchActor) {
+                searchActor.visible = true;
+                searchActor.opacity = 0;
+                searchActor.reactive = false;
+            }
+            return;
+        }
+
+        this._aiView.visible = false;
+        if (searchActor) {
+            searchActor.visible = true;
+            searchActor.opacity = 255;
+            searchActor.reactive = true;
+        }
+    }
+
+    _raiseAiView() {
+        if (!this._aiView)
+            return;
+
+        const parent = this._aiView.get_parent?.();
+        if (!parent)
+            return;
+
+        try {
+            if (typeof parent.set_child_above_sibling === 'function') {
+                parent.set_child_above_sibling(this._aiView, null);
+                return;
+            }
+
+            if (typeof this._aiView.raise_top === 'function')
+                this._aiView.raise_top();
+        } catch (e) {
+            console.warn(`AI Search Assistant: Failed to raise AI view: ${e.message}`);
+        }
     }
 
     disable() {
@@ -180,6 +296,11 @@ export default class AiSearchAssistantExtension extends Extension {
             if (global.stage)
                 global.stage.disconnect(this._stageSignal);
             this._stageSignal = null;
+        }
+
+        if (this._searchTextSignal && this._searchTextActor) {
+            this._searchTextActor.disconnect(this._searchTextSignal);
+            this._searchTextSignal = null;
         }
 
         if (this._iconButtonSignal && this._searchEntry) {
@@ -206,26 +327,20 @@ export default class AiSearchAssistantExtension extends Extension {
         }
         
         // Restore search results visibility just in case
-        let overviewControls = null;
-        if (Main.overview._controls) {
-             overviewControls = Main.overview._controls;
-        } else if (Main.overview._overview && Main.overview._overview.controls) {
-             overviewControls = Main.overview._overview.controls;
-        }
-
-        if (overviewControls && overviewControls._searchController && overviewControls._searchController._searchResults) {
-             const searchActor = overviewControls._searchController._searchResults.actor || overviewControls._searchController._searchResults;
-             if (searchActor) {
-                 searchActor.visible = true;
-                 searchActor.reactive = true;
-             }
+        if (this._searchResultsActor) {
+            this._searchResultsActor.visible = true;
+            this._searchResultsActor.opacity = 255;
+            this._searchResultsActor.reactive = true;
         }
 
         this._searchEntry = null;
+        this._searchTextActor = null;
         this._searchResultsView = null;
-        this._searchContainer = null;
+        this._searchResultsActor = null;
+        this._aiViewParent = null;
         this._settings = null;
         this._isAiMode = false;
+        this._isSubmitting = false;
         this._usesPrimaryIcon = false;
         this._icon = null;
     }

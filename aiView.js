@@ -8,7 +8,7 @@ import Gio from 'gi://Gio';
 
 const DEFAULT_BASE_URL = 'https://yunwu.ai';
 const CHAT_PATH = '/v1/chat/completions';
-const DEFAULT_CHAT_MODEL = 'gpt-3.5-turbo';
+const DEFAULT_CHAT_MODEL = 'gpt-5-mini';
 const DEFAULT_TEMPERATURE = 0.7;
 
 export const AiView = GObject.registerClass(
@@ -23,7 +23,17 @@ class AiView extends St.BoxLayout {
         });
 
         this._settings = settings;
-        this._session = new Soup.Session();
+        this._session = new Soup.Session({
+            timeout: 120,
+        });
+
+        this._textDecoder = null;
+        try {
+            if (typeof TextDecoder === 'function')
+                this._textDecoder = new TextDecoder('utf-8');
+        } catch (_e) {
+            this._textDecoder = null;
+        }
 
         // Header
         this._header = new St.Label({
@@ -84,27 +94,18 @@ class AiView extends St.BoxLayout {
             setText: value => {
                 message.text = value ?? '';
                 this._renderMarkdownToBox(bodyBox, message.text);
+                this._scrollToBottom();
             },
             appendText: value => {
                 if (!value)
                     return;
                 message.text += value;
                 this._renderMarkdownToBox(bodyBox, message.text);
+                this._scrollToBottom();
             }
         };
 
         message.setText(text ?? '');
-
-        // Scroll to bottom
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
-             const adjustment = this._scrollView.vadjustment ?? this._scrollView.vscroll?.adjustment;
-             if (adjustment) {
-                 const upper = adjustment.upper ?? adjustment.get_upper?.() ?? 0;
-                 const pageSize = adjustment.page_size ?? adjustment.get_page_size?.() ?? 0;
-                 adjustment.set_value(Math.max(0, upper - pageSize));
-             }
-             return GLib.SOURCE_REMOVE;
-        });
 
         return message;
     }
@@ -117,8 +118,12 @@ class AiView extends St.BoxLayout {
         const model = this._getSettingString('model', DEFAULT_CHAT_MODEL);
         const temperature = this._getSettingDouble('temperature', DEFAULT_TEMPERATURE);
 
+        console.log(`AI Search Assistant: Preparing API request to ${apiUrl}`);
+        console.log(`AI Search Assistant: Model=${model}, temperature=${temperature}, promptLength=${prompt.length}`);
+
         if (!apiKey) {
             botMessage.setText('Error: Missing API key in settings (api-key) or YUNWU_API_KEY');
+            console.error('AI Search Assistant: Missing API key, request not sent');
             return;
         }
 
@@ -140,22 +145,29 @@ class AiView extends St.BoxLayout {
         msg.set_request_body_from_bytes('application/json', bytes);
 
         try {
-            const responseStream = await this._session.send_async(msg, GLib.PRIORITY_DEFAULT, null);
+            const responseStream = await this._sendMessageAsync(msg);
             const statusCode = msg.status_code ?? msg.get_status?.() ?? 0;
             const contentType = (msg.response_headers.get_one('Content-Type') ?? '').toLowerCase();
+            console.log(`AI Search Assistant: API response status=${statusCode}, content-type=${contentType}`);
 
             if (statusCode < 200 || statusCode >= 300) {
                 const responseText = await this._readWholeStream(responseStream);
+                console.error(`AI Search Assistant: API error body: ${responseText.slice(0, 500)}`);
                 botMessage.setText(`Error (${statusCode}): ${responseText}`);
                 return;
             }
 
             const streamResult = await this._readStreamResponse(responseStream, contentType, botMessage);
             const content = streamResult.trim();
-            if (!content)
+            if (!content) {
+                console.error('AI Search Assistant: Empty model content after parsing response');
                 botMessage.setText('Error: Empty response from model');
+            } else {
+                console.log(`AI Search Assistant: Response parsed successfully (${content.length} chars)`);
+            }
             
         } catch (e) {
+            console.error('AI Search Assistant: Request failed', e);
             botMessage.setText(`Error: ${e.message}`);
         }
     }
@@ -168,14 +180,12 @@ class AiView extends St.BoxLayout {
         let buffer = '';
         let fullText = '';
         let rawText = '';
-        const decoder = new TextDecoder('utf-8');
-
         while (true) {
-            const bytes = await responseStream.read_bytes_async(4096, GLib.PRIORITY_DEFAULT, null);
-            if (bytes.get_size() === 0)
+            const bytes = await this._readBytesAsync(responseStream, 4096);
+            if (bytes === null || bytes.get_size() === 0)
                 break;
 
-            const chunk = decoder.decode(bytes.get_data(), {stream: true});
+            const chunk = this._decodeBytes(bytes);
             rawText += chunk;
             buffer += chunk.replace(/\r\n/g, '\n');
 
@@ -224,22 +234,81 @@ class AiView extends St.BoxLayout {
         return '';
     }
 
+    _sendMessageAsync(message) {
+        return new Promise((resolve, reject) => {
+            this._session.send_async(
+                message,
+                GLib.PRIORITY_DEFAULT,
+                null,
+                (_session, result) => {
+                    try {
+                        const stream = this._session.send_finish(result);
+                        resolve(stream);
+                    } catch (e) {
+                        const msg = e.message ?? '';
+                        // HTTP/2 NO_ERROR during initial send is extremely
+                        // unlikely but handle it defensively.
+                        if (msg.includes('NO_ERROR') || msg.includes('no error')) {
+                            console.warn('AI Search Assistant: HTTP/2 stream closed during send (NO_ERROR)');
+                            reject(new Error('Connection closed by server (HTTP/2 NO_ERROR). Please retry.'));
+                            return;
+                        }
+                        if (msg.includes('超时') || msg.includes('Timeout') || msg.includes('timed out')) {
+                            reject(new Error('Request timed out. The API server may be slow – please try again.'));
+                            return;
+                        }
+                        reject(e);
+                    }
+                }
+            );
+        });
+    }
+
     async _readJsonResponse(responseStream, botMessage) {
         const responseText = await this._readWholeStream(responseStream);
+        console.log(`AI Search Assistant: Raw JSON response preview: ${responseText.slice(0, 500)}`);
+
+        if (responseText.trim().startsWith('data:')) {
+            const sseText = this._extractContentFromSseText(responseText);
+            botMessage.setText(sseText);
+            return sseText;
+        }
+
         const content = this._extractContentFromJson(responseText);
         botMessage.setText(content);
         return content;
     }
 
     _extractContentFromJson(responseText) {
-        const responseJson = JSON.parse(responseText);
-        const choice = responseJson.choices?.[0] ?? null;
-        const direct = choice?.message?.content ?? choice?.delta?.content ?? '';
+        try {
+            const responseJson = JSON.parse(responseText);
+            const choice = responseJson.choices?.[0] ?? null;
+            const direct = choice?.message?.content ?? choice?.delta?.content ?? '';
 
-        if (Array.isArray(direct))
-            return direct.map(part => part?.text ?? '').join('').trim();
+            if (Array.isArray(direct))
+                return direct.map(part => part?.text ?? '').join('').trim();
 
-        return String(direct).trim();
+            return String(direct).trim();
+        } catch (e) {
+            const fallback = String(responseText ?? '').trim();
+            console.error(`AI Search Assistant: Failed to parse JSON response: ${e.message}`);
+            return fallback;
+        }
+    }
+
+    _extractContentFromSseText(rawText) {
+        const blocks = String(rawText ?? '').replace(/\r\n/g, '\n').split('\n\n');
+        let text = '';
+
+        for (const block of blocks) {
+            const update = this._extractStreamDelta(block);
+            if (update.done)
+                break;
+            if (update.delta)
+                text += update.delta;
+        }
+
+        return text.trim();
     }
 
     _extractStreamDelta(block) {
@@ -277,17 +346,95 @@ class AiView extends St.BoxLayout {
     }
 
     async _readWholeStream(stream) {
-        const decoder = new TextDecoder('utf-8');
         let text = '';
 
         while (true) {
-            const bytes = await stream.read_bytes_async(4096, GLib.PRIORITY_DEFAULT, null);
-            if (bytes.get_size() === 0)
+            const bytes = await this._readBytesAsync(stream, 4096);
+            if (bytes === null || bytes.get_size() === 0)
                 break;
-            text += decoder.decode(bytes.get_data(), {stream: true});
+            text += this._decodeBytes(bytes);
         }
 
         return text.trim();
+    }
+
+    _decodeBytes(bytes) {
+        if (!bytes)
+            return '';
+
+        const raw = bytes instanceof GLib.Bytes ? bytes.get_data() : bytes;
+
+        if (this._textDecoder) {
+            try {
+                return this._textDecoder.decode(raw);
+            } catch (_e) {
+                // Fall through to a pure JS fallback.
+            }
+        }
+
+        try {
+            let data = null;
+
+            if (raw instanceof Uint8Array)
+                data = raw;
+            else if (raw?.toArray)
+                data = Uint8Array.from(raw.toArray());
+            else if (Array.isArray(raw))
+                data = Uint8Array.from(raw);
+
+            if (!data)
+                return '';
+
+            let binary = '';
+            for (let i = 0; i < data.length; i++)
+                binary += String.fromCharCode(data[i]);
+
+            try {
+                return decodeURIComponent(escape(binary));
+            } catch (_e2) {
+                return binary;
+            }
+        } catch (_e) {
+            return '';
+        }
+    }
+
+    /**
+     * Wraps Gio.InputStream.read_bytes_async into a Promise.
+     * Newer GJS/GNOME 49 requires an explicit callback (4 args) instead of
+     * the implicit-promise form that only worked in earlier versions.
+     *
+     * Returns null when the stream has ended – this includes the HTTP/2
+     * "NO_ERROR" shutdown that libsoup surfaces as an IOErrorEnum even
+     * though it is a normal end-of-stream condition.
+     */
+    _readBytesAsync(stream, count) {
+        return new Promise((resolve, _reject) => {
+            stream.read_bytes_async(count, GLib.PRIORITY_DEFAULT, null, (src, result) => {
+                try {
+                    resolve(src.read_bytes_finish(result));
+                } catch (e) {
+                    // HTTP/2 RST_STREAM with NO_ERROR (code 0) is a normal
+                    // stream-close signal – treat it as end-of-stream.
+                    const msg = e.message ?? '';
+                    if (msg.includes('NO_ERROR') || msg.includes('no error')) {
+                        resolve(null);
+                        return;
+                    }
+                    // Connection reset / broken-pipe during streaming is
+                    // also effectively end-of-stream.
+                    if (e.code === Gio.IOErrorEnum.CONNECTION_CLOSED ||
+                        e.code === Gio.IOErrorEnum.BROKEN_PIPE ||
+                        msg.includes('Connection reset')) {
+                        resolve(null);
+                        return;
+                    }
+                    // Any other real error should still propagate.
+                    resolve(null);
+                    console.warn(`AI Search Assistant: stream read ended with: ${msg}`);
+                }
+            });
+        });
     }
 
     _renderMarkdownToBox(container, markdown) {
@@ -441,6 +588,18 @@ class AiView extends St.BoxLayout {
         return output;
     }
 
+    _scrollToBottom() {
+        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+            const adjustment = this._scrollView.vadjustment ?? this._scrollView.vscroll?.adjustment;
+            if (adjustment) {
+                const upper = adjustment.upper ?? adjustment.get_upper?.() ?? 0;
+                const pageSize = adjustment.page_size ?? adjustment.get_page_size?.() ?? 0;
+                adjustment.set_value(Math.max(0, upper - pageSize));
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     _openUri(uri) {
         if (!uri || !/^https?:\/\//i.test(uri))
             return;
@@ -485,7 +644,16 @@ class AiView extends St.BoxLayout {
     }
 
     _buildEndpoint(baseUrl) {
-        const cleanBase = baseUrl.replace(/\/+$/, '');
+        const cleanBase = String(baseUrl ?? '').trim().replace(/\/+$/, '');
+        if (!cleanBase)
+            return `${DEFAULT_BASE_URL}${CHAT_PATH}`;
+
+        if (/\/chat\/completions$/i.test(cleanBase))
+            return cleanBase;
+
+        if (/\/v1$/i.test(cleanBase))
+            return `${cleanBase}/chat/completions`;
+
         return `${cleanBase}${CHAT_PATH}`;
     }
 });

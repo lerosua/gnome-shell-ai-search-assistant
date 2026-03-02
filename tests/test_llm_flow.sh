@@ -4,7 +4,7 @@ set -euo pipefail
 
 DEFAULT_BASE_URL="https://yunwu.ai"
 API_PATH="/v1/chat/completions"
-MODEL="gpt-3.5-turbo"
+MODEL="gpt-5-mini"
 
 BASE_URL="${YUNWU_BASE_URL:-}"
 if [[ -z "$BASE_URL" ]]; then

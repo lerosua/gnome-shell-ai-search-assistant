@@ -37,9 +37,9 @@ export default class AiSearchAssistantPreferences extends ExtensionPreferences {
 
         this._addEntryRow(group, settings, {
             title: 'Model',
-            subtitle: 'Example: gpt-3.5-turbo',
+            subtitle: 'Example: gpt-5-mini',
             key: 'model',
-            placeholder: 'gpt-3.5-turbo'
+            placeholder: 'gpt-5-mini'
         });
 
         this._addTemperatureRow(group, settings);

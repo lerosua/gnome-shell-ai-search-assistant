@@ -12,7 +12,7 @@
       <description>Base URL for OpenAI-compatible chat APIs. The extension appends /v1/chat/completions.</description>
     </key>
     <key name="model" type="s">
-      <default>"gpt-3.5-turbo"</default>
+      <default>"gpt-5-mini"</default>
       <summary>Chat model name</summary>
       <description>Model identifier sent in requests.</description>
     </key>
