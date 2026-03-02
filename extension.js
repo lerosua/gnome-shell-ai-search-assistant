@@ -64,6 +64,13 @@ export default class AiSearchAssistantExtension extends Extension {
                 return Clutter.EVENT_PROPAGATE;
 
             const key = event.get_key_symbol();
+
+            if (key === Clutter.KEY_Escape) {
+                this._toggleMode();
+                console.log('AI Search Assistant: Escape intercepted, switched to Search Mode');
+                return Clutter.EVENT_STOP;
+            }
+
             if (key !== Clutter.KEY_Return && key !== Clutter.KEY_KP_Enter)
                 return Clutter.EVENT_PROPAGATE;
 
