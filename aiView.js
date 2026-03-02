@@ -10,6 +10,10 @@ const DEFAULT_BASE_URL = 'https://yunwu.ai';
 const CHAT_PATH = '/v1/chat/completions';
 const DEFAULT_CHAT_MODEL = 'gpt-5-mini';
 const DEFAULT_TEMPERATURE = 0.7;
+const DEFAULT_MAX_HISTORY_TURNS = 8;
+const DEFAULT_MAX_RECALL_ITEMS = 6;
+const MEMORY_DIRNAME = 'ai-search-assistant';
+const MEMORY_FILENAME = 'chat-history.jsonl';
 
 export const AiView = GObject.registerClass(
 class AiView extends St.BoxLayout {
@@ -27,6 +31,12 @@ class AiView extends St.BoxLayout {
         this._session = new Soup.Session({
             timeout: 120,
         });
+        this._conversationHistory = [];
+        this._maxHistoryTurns = DEFAULT_MAX_HISTORY_TURNS;
+        this._maxRecallItems = DEFAULT_MAX_RECALL_ITEMS;
+        this._memoryFilePath = this._buildMemoryFilePath();
+        this._allMemoryEntries = [];
+        this._currentSessionId = `${Date.now()}`;
 
         this._textDecoder = null;
         try {
@@ -62,8 +72,9 @@ class AiView extends St.BoxLayout {
         });
         this._scrollView.set_child(this._contentBox);
 
-        // Add a welcome message
-        this.addMessage('System', 'Hello! Click the search button to toggle AI mode.');
+        this._restoreConversationFromMemory();
+        if (this._conversationHistory.length === 0)
+            this.addMessage('System', 'Hello! Click the search button to toggle AI mode.');
     }
 
     addMessage(sender, text) {
@@ -118,9 +129,10 @@ class AiView extends St.BoxLayout {
         const apiUrl = this._buildEndpoint(baseUrl);
         const model = this._getSettingString('model', DEFAULT_CHAT_MODEL);
         const temperature = this._getSettingDouble('temperature', DEFAULT_TEMPERATURE);
+        const requestMessages = this._buildRequestMessages(prompt);
 
         console.log(`AI Search Assistant: Preparing API request to ${apiUrl}`);
-        console.log(`AI Search Assistant: Model=${model}, temperature=${temperature}, promptLength=${prompt.length}`);
+        console.log(`AI Search Assistant: Model=${model}, temperature=${temperature}, promptLength=${prompt.length}, messages=${requestMessages.length}`);
 
         if (!apiKey) {
             botMessage.setText('Error: Missing API key in settings (api-key) or YUNWU_API_KEY');
@@ -135,9 +147,7 @@ class AiView extends St.BoxLayout {
 
         const body = JSON.stringify({
             model,
-            messages: [
-                {'role': 'user', 'content': prompt}
-            ],
+            messages: requestMessages,
             temperature,
             stream: true
         });
@@ -164,6 +174,7 @@ class AiView extends St.BoxLayout {
                 console.error('AI Search Assistant: Empty model content after parsing response');
                 botMessage.setText('Error: Empty response from model');
             } else {
+                this._rememberConversation(prompt, content);
                 console.log(`AI Search Assistant: Response parsed successfully (${content.length} chars)`);
             }
             
@@ -656,5 +667,246 @@ class AiView extends St.BoxLayout {
             return `${cleanBase}/chat/completions`;
 
         return `${cleanBase}${CHAT_PATH}`;
+    }
+
+    _buildRequestMessages(prompt) {
+        const history = this._getTrimmedHistory();
+        const recall = this._recallRelevantMemory(prompt, this._maxRecallItems);
+        return [
+            ...recall,
+            ...history,
+            {role: 'user', content: String(prompt ?? '')}
+        ];
+    }
+
+    _rememberConversation(prompt, responseText) {
+        this._appendHistoryEntry('user', prompt);
+        this._appendHistoryEntry('assistant', responseText);
+    }
+
+    _appendHistoryEntry(role, content) {
+        const text = String(content ?? '').trim();
+        if (!text)
+            return;
+
+        const entry = {
+            role,
+            content: text,
+            ts: Date.now(),
+            sessionId: this._currentSessionId
+        };
+
+        this._conversationHistory.push({role: entry.role, content: entry.content});
+        this._allMemoryEntries.push(entry);
+        this._appendMemoryEntry(entry);
+
+        const maxMessages = Math.max(1, this._maxHistoryTurns) * 2;
+        if (this._conversationHistory.length > maxMessages)
+            this._conversationHistory.splice(0, this._conversationHistory.length - maxMessages);
+    }
+
+    _getTrimmedHistory() {
+        const maxMessages = Math.max(1, this._maxHistoryTurns) * 2;
+        if (this._conversationHistory.length <= maxMessages)
+            return [...this._conversationHistory];
+
+        return this._conversationHistory.slice(this._conversationHistory.length - maxMessages);
+    }
+
+    _restoreConversationFromMemory() {
+        this._allMemoryEntries = this._loadMemoryEntries();
+        if (this._allMemoryEntries.length === 0)
+            return;
+
+        const bySession = new Map();
+        for (const entry of this._allMemoryEntries) {
+            if (!entry.sessionId)
+                continue;
+            if (!bySession.has(entry.sessionId))
+                bySession.set(entry.sessionId, []);
+            bySession.get(entry.sessionId).push(entry);
+        }
+
+        if (bySession.size === 0)
+            return;
+
+        let latestSessionId = null;
+        let latestTs = -1;
+        for (const [sessionId, entries] of bySession.entries()) {
+            const ts = entries[entries.length - 1]?.ts ?? 0;
+            if (ts > latestTs) {
+                latestTs = ts;
+                latestSessionId = sessionId;
+            }
+        }
+
+        if (!latestSessionId)
+            return;
+
+        const lastSessionEntries = bySession.get(latestSessionId) ?? [];
+        for (const entry of lastSessionEntries) {
+            const sender = this._roleToSender(entry.role);
+            this.addMessage(sender, entry.content);
+            this._conversationHistory.push({role: entry.role, content: entry.content});
+        }
+
+        const maxMessages = Math.max(1, this._maxHistoryTurns) * 2;
+        if (this._conversationHistory.length > maxMessages)
+            this._conversationHistory = this._conversationHistory.slice(this._conversationHistory.length - maxMessages);
+    }
+
+    _roleToSender(role) {
+        if (role === 'assistant')
+            return 'AI';
+        if (role === 'user')
+            return 'You';
+        return 'System';
+    }
+
+    _buildMemoryFilePath() {
+        const stateDir = GLib.get_user_state_dir();
+        return GLib.build_filenamev([stateDir, MEMORY_DIRNAME, MEMORY_FILENAME]);
+    }
+
+    _ensureMemoryDir() {
+        const dir = GLib.path_get_dirname(this._memoryFilePath);
+        try {
+            GLib.mkdir_with_parents(dir, 0o700);
+        } catch (e) {
+            console.warn(`AI Search Assistant: Failed to create memory dir ${dir}: ${e.message}`);
+        }
+    }
+
+    _appendMemoryEntry(entry) {
+        this._ensureMemoryDir();
+
+        const line = `${JSON.stringify(entry)}\n`;
+        let existing = '';
+        try {
+            const [ok, bytes] = GLib.file_get_contents(this._memoryFilePath);
+            if (ok)
+                existing = this._decodeBytes(bytes);
+        } catch (_e) {
+            existing = '';
+        }
+
+        try {
+            GLib.file_set_contents(this._memoryFilePath, `${existing}${line}`);
+        } catch (e) {
+            console.warn(`AI Search Assistant: Failed to append memory entry: ${e.message}`);
+        }
+    }
+
+    _loadMemoryEntries() {
+        this._ensureMemoryDir();
+
+        let content = '';
+        try {
+            const [ok, bytes] = GLib.file_get_contents(this._memoryFilePath);
+            if (ok)
+                content = this._decodeBytes(bytes);
+        } catch (_e) {
+            return [];
+        }
+
+        const lines = String(content ?? '').split('\n');
+        const entries = [];
+        for (const line of lines) {
+            const raw = line.trim();
+            if (!raw)
+                continue;
+
+            try {
+                const parsed = JSON.parse(raw);
+                const role = String(parsed.role ?? '').trim();
+                const message = String(parsed.content ?? '').trim();
+                if (!role || !message)
+                    continue;
+
+                entries.push({
+                    role,
+                    content: message,
+                    ts: Number(parsed.ts ?? 0),
+                    sessionId: String(parsed.sessionId ?? '')
+                });
+            } catch (_e) {
+                // Ignore malformed lines.
+            }
+        }
+
+        return entries;
+    }
+
+    _recallRelevantMemory(prompt, maxItems) {
+        const limit = Math.max(0, maxItems | 0);
+        if (limit === 0)
+            return [];
+
+        const queryTokens = this._tokenize(prompt);
+        if (queryTokens.size === 0)
+            return [];
+
+        const recentSet = new Set(this._getTrimmedHistory().map(item => `${item.role}\u0000${item.content}`));
+        const ranked = [];
+
+        for (const entry of this._allMemoryEntries) {
+            const key = `${entry.role}\u0000${entry.content}`;
+            if (recentSet.has(key))
+                continue;
+
+            const tokens = this._tokenize(entry.content);
+            if (tokens.size === 0)
+                continue;
+
+            let overlap = 0;
+            for (const token of queryTokens) {
+                if (tokens.has(token))
+                    overlap++;
+            }
+
+            if (overlap === 0)
+                continue;
+
+            ranked.push({
+                score: overlap,
+                ts: entry.ts ?? 0,
+                role: entry.role,
+                content: entry.content
+            });
+        }
+
+        ranked.sort((a, b) => {
+            if (b.score !== a.score)
+                return b.score - a.score;
+            return b.ts - a.ts;
+        });
+
+        const out = [];
+        const seen = new Set();
+        for (const item of ranked) {
+            const key = `${item.role}\u0000${item.content}`;
+            if (seen.has(key))
+                continue;
+
+            out.push({role: item.role, content: item.content});
+            seen.add(key);
+            if (out.length >= limit)
+                break;
+        }
+
+        return out.reverse();
+    }
+
+    _tokenize(text) {
+        const raw = String(text ?? '').toLowerCase();
+        const chunks = raw.split(/[^a-z0-9\u4e00-\u9fff_]+/i);
+        const set = new Set();
+        for (const chunk of chunks) {
+            const token = chunk.trim();
+            if (token.length < 2)
+                continue;
+            set.add(token);
+        }
+        return set;
     }
 });
