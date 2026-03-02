@@ -5,16 +5,18 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import { AiView } from './aiView.js';
 
+const AI_ENTRY_PREFIX = '_';
+
 export default class AiSearchAssistantExtension extends Extension {
     enable() {
         console.log('AI Search Assistant: Enabling...');
         
         this._isAiMode = false;
         this._isSubmitting = false;
+        this._isUpdatingSearchText = false;
         this._settings = this.getSettings();
         this._searchEntry = Main.overview.searchEntry;
         this._searchTextActor = this._searchEntry?.clutter_text ?? null;
-
         this._usesPrimaryIcon = false;
 
         // Create the Icon
@@ -92,8 +94,16 @@ export default class AiSearchAssistantExtension extends Extension {
                 if (!this._isAiMode)
                     return;
 
+                if (this._isUpdatingSearchText)
+                    return;
+
+                const rawText = this._getSearchEntryText();
+                if (rawText.trim().length === 0)
+                    this._ensureAiPrefix();
+
                 GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
                     this._syncModeVisibility();
+                    this._scheduleVisibilityReassertion();
                     return GLib.SOURCE_REMOVE;
                 });
             });
@@ -172,6 +182,7 @@ export default class AiSearchAssistantExtension extends Extension {
             if (this._usesPrimaryIcon)
                 this._icon.add_style_class_name('active');
             this._icon.icon_name = 'utilities-terminal-symbolic';
+            this._ensureAiPrefix();
             console.log('AI Search Assistant: Switched to AI Mode');
         } else {
             if (this._aiButton)
@@ -179,16 +190,17 @@ export default class AiSearchAssistantExtension extends Extension {
             if (this._usesPrimaryIcon)
                 this._icon.remove_style_class_name('active');
             this._icon.icon_name = 'edit-find-symbolic';
+            this._clearAiPrefixIfPresent();
             console.log('AI Search Assistant: Switched to Search Mode');
         }
 
         this._syncModeVisibility();
+        this._scheduleVisibilityReassertion();
     }
 
     async _submitAiPrompt() {
-        const searchText = this._searchEntry?.clutter_text ?? null;
-        const text = searchText?.get_text?.() ?? this._searchEntry?.get_text?.() ?? '';
-        const prompt = String(text).trim();
+        const text = this._getSearchEntryText();
+        const prompt = this._extractPromptFromInput(text);
 
         if (prompt.length === 0 || this._isSubmitting)
             return;
@@ -202,10 +214,8 @@ export default class AiSearchAssistantExtension extends Extension {
 
         this._aiView.addMessage('You', prompt);
 
-        if (searchText?.set_text)
-            searchText.set_text('');
-        if (this._searchEntry?.set_text)
-            this._searchEntry.set_text('');
+        this._setSearchEntryText('');
+        this._ensureAiPrefix();
 
         // GNOME Shell's search controller reacts to text changes and hides
         // the search results container when the entry becomes empty.  Since
@@ -213,19 +223,8 @@ export default class AiSearchAssistantExtension extends Extension {
         // after the search controller has finished processing the empty text.
         GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
             if (this._isAiMode && this._aiView) {
-                this._aiView.visible = true;
-                this._raiseAiView();
-                // Also ensure the parent container stays visible
-                const parent = this._aiView.get_parent?.();
-                if (parent && !parent.visible)
-                    parent.visible = true;
-                // Keep native search results allocated, but visually hidden,
-                // so the AI view can keep the same size as search results.
-                if (this._searchResultsActor) {
-                    this._searchResultsActor.visible = true;
-                    this._searchResultsActor.opacity = 0;
-                    this._searchResultsActor.reactive = false;
-                }
+                this._syncModeVisibility();
+                this._scheduleVisibilityReassertion();
             }
             return GLib.SOURCE_REMOVE;
         });
@@ -235,6 +234,58 @@ export default class AiSearchAssistantExtension extends Extension {
         } finally {
             this._isSubmitting = false;
         }
+    }
+
+    _getSearchEntryText() {
+        const searchText = this._searchEntry?.clutter_text ?? null;
+        return searchText?.get_text?.() ?? this._searchEntry?.get_text?.() ?? '';
+    }
+
+    _setSearchEntryText(value) {
+        this._isUpdatingSearchText = true;
+        try {
+            const text = String(value ?? '');
+            const searchText = this._searchEntry?.clutter_text ?? null;
+            if (searchText?.set_text)
+                searchText.set_text(text);
+            if (this._searchEntry?.set_text)
+                this._searchEntry.set_text(text);
+
+            const cursorPos = text.length;
+            if (searchText?.set_cursor_position)
+                searchText.set_cursor_position(cursorPos);
+            if (searchText?.set_selection)
+                searchText.set_selection(cursorPos, cursorPos);
+        } finally {
+            this._isUpdatingSearchText = false;
+        }
+    }
+
+    _extractPromptFromInput(text) {
+        const input = String(text ?? '').trim();
+        if (input.length === 0)
+            return '';
+
+        return input.replace(/^_+\s*/, '').trim();
+    }
+
+    _ensureAiPrefix() {
+        if (!this._isAiMode)
+            return;
+
+        const current = this._getSearchEntryText();
+        if (current.trim().length > 0)
+            return;
+
+        this._setSearchEntryText(AI_ENTRY_PREFIX);
+    }
+
+    _clearAiPrefixIfPresent() {
+        const current = this._getSearchEntryText();
+        if (!/^_+\s*$/.test(current.trim()))
+            return;
+
+        this._setSearchEntryText('');
     }
 
     _syncModeVisibility() {
@@ -247,15 +298,13 @@ export default class AiSearchAssistantExtension extends Extension {
             this._aiView.visible = true;
             this._aiView.reactive = true;
             this._raiseAiView();
-
-            const parent = this._aiView.get_parent?.();
-            if (parent && !parent.visible)
-                parent.visible = true;
+            this._ensureVisibleChain(this._aiView);
 
             if (searchActor) {
                 searchActor.visible = true;
                 searchActor.opacity = 0;
                 searchActor.reactive = false;
+                this._ensureVisibleChain(searchActor);
             }
             return;
         }
@@ -289,6 +338,44 @@ export default class AiSearchAssistantExtension extends Extension {
         }
     }
 
+    _ensureVisibleChain(actor) {
+        for (let node = actor; node; node = node.get_parent?.()) {
+            if (node === global.stage)
+                break;
+
+            if (!node.visible)
+                node.visible = true;
+        }
+    }
+
+    _scheduleVisibilityReassertion() {
+        if (!this._isAiMode || !this._aiView)
+            return;
+
+        if (this._visibilityReassertionId) {
+            GLib.source_remove(this._visibilityReassertionId);
+            this._visibilityReassertionId = null;
+        }
+
+        let retries = 6;
+        this._visibilityReassertionId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 25, () => {
+            if (!this._isAiMode || !this._aiView) {
+                this._visibilityReassertionId = null;
+                return GLib.SOURCE_REMOVE;
+            }
+
+            this._syncModeVisibility();
+            retries--;
+
+            if (retries <= 0) {
+                this._visibilityReassertionId = null;
+                return GLib.SOURCE_REMOVE;
+            }
+
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
     disable() {
         console.log('AI Search Assistant: Disabling...');
 
@@ -301,6 +388,11 @@ export default class AiSearchAssistantExtension extends Extension {
         if (this._searchTextSignal && this._searchTextActor) {
             this._searchTextActor.disconnect(this._searchTextSignal);
             this._searchTextSignal = null;
+        }
+
+        if (this._visibilityReassertionId) {
+            GLib.source_remove(this._visibilityReassertionId);
+            this._visibilityReassertionId = null;
         }
 
         if (this._iconButtonSignal && this._searchEntry) {
@@ -325,6 +417,8 @@ export default class AiSearchAssistantExtension extends Extension {
             this._aiView.destroy();
             this._aiView = null;
         }
+
+        this._clearAiPrefixIfPresent();
         
         // Restore search results visibility just in case
         if (this._searchResultsActor) {
@@ -341,6 +435,7 @@ export default class AiSearchAssistantExtension extends Extension {
         this._settings = null;
         this._isAiMode = false;
         this._isSubmitting = false;
+        this._isUpdatingSearchText = false;
         this._usesPrimaryIcon = false;
         this._icon = null;
     }
