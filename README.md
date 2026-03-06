@@ -2,6 +2,8 @@
 
 GNOME Shell extension that adds an AI mode to the overview search entry.
 
+Maintainer: lerosua <lerosua@gmail.com>
+
 ## Features
 
 - Toggle between normal search and AI chat mode from the search icon.
