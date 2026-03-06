@@ -1,4 +1,4 @@
-# AI Search Assistant
+# GNOME Shell AI Search Assistant
 
 GNOME Shell extension that adds an AI mode to the overview search entry.
 
@@ -34,10 +34,11 @@ Open extension preferences to set:
 
 ## Development
 
-Install locally:
+Install locally (symlink for development):
 
 ```bash
-./install.sh --dev
+mkdir -p ~/.local/share/gnome-shell/extensions
+ln -sfn "$PWD" ~/.local/share/gnome-shell/extensions/ai-search-assistant@lerosua
 ```
 
 Compile schemas manually when needed:
