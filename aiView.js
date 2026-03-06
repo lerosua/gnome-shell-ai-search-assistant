@@ -37,6 +37,11 @@ class AiView extends St.BoxLayout {
         this._memoryFilePath = this._buildMemoryFilePath();
         this._allMemoryEntries = [];
         this._currentSessionId = `${Date.now()}`;
+        this._thinkingAnimationId = null;
+
+        this.connect('destroy', () => {
+            this._stopThinkingAnimation();
+        });
 
         this._textDecoder = null;
         try {
@@ -123,7 +128,8 @@ class AiView extends St.BoxLayout {
     }
 
     async generateResponse(prompt) {
-        const botMessage = this.addMessage('AI', 'Thinking...');
+        const botMessage = this.addMessage('AI', '');
+        this._startThinkingAnimation(botMessage);
         const apiKey = this._getApiKey();
         const baseUrl = this._getSettingString('base-url', DEFAULT_BASE_URL);
         const apiUrl = this._buildEndpoint(baseUrl);
@@ -135,6 +141,7 @@ class AiView extends St.BoxLayout {
         console.log(`AI Search Assistant: Model=${model}, temperature=${temperature}, promptLength=${prompt.length}, messages=${requestMessages.length}`);
 
         if (!apiKey) {
+            this._stopThinkingAnimation();
             botMessage.setText('Error: Missing API key in settings (api-key) or YUNWU_API_KEY');
             console.error('AI Search Assistant: Missing API key, request not sent');
             return;
@@ -164,11 +171,13 @@ class AiView extends St.BoxLayout {
             if (statusCode < 200 || statusCode >= 300) {
                 const responseText = await this._readWholeStream(responseStream);
                 console.error(`AI Search Assistant: API request failed with HTTP ${statusCode} (${responseText.length} chars)`);
+                this._stopThinkingAnimation();
                 botMessage.setText(`Error (${statusCode}): ${responseText}`);
                 return;
             }
 
             const streamResult = await this._readStreamResponse(responseStream, contentType, botMessage);
+            this._stopThinkingAnimation();
             const content = streamResult.trim();
             if (!content) {
                 console.error('AI Search Assistant: Empty model content after parsing response');
@@ -180,8 +189,35 @@ class AiView extends St.BoxLayout {
             
         } catch (e) {
             console.error('AI Search Assistant: Request failed', e);
+            this._stopThinkingAnimation();
             botMessage.setText(`Error: ${e.message}`);
         }
+    }
+
+    _startThinkingAnimation(message) {
+        this._stopThinkingAnimation();
+
+        const frames = ['Thinking.', 'Thinking..', 'Thinking...'];
+        let index = 0;
+
+        const tick = () => {
+            message.setText(frames[index]);
+            index = (index + 1) % frames.length;
+        };
+
+        tick();
+        this._thinkingAnimationId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
+            tick();
+            return GLib.SOURCE_CONTINUE;
+        });
+    }
+
+    _stopThinkingAnimation() {
+        if (!this._thinkingAnimationId)
+            return;
+
+        GLib.source_remove(this._thinkingAnimationId);
+        this._thinkingAnimationId = null;
     }
 
     async _readStreamResponse(responseStream, contentType, botMessage) {
@@ -216,8 +252,10 @@ class AiView extends St.BoxLayout {
                 if (!update.delta)
                     continue;
 
-                if (fullText.length === 0)
+                if (fullText.length === 0) {
+                    this._stopThinkingAnimation();
                     botMessage.setText('');
+                }
 
                 fullText += update.delta;
                 botMessage.setText(fullText);
@@ -227,8 +265,10 @@ class AiView extends St.BoxLayout {
         if (buffer.trim().length > 0) {
             const update = this._extractStreamDelta(buffer);
             if (update.delta) {
-                if (fullText.length === 0)
+                if (fullText.length === 0) {
+                    this._stopThinkingAnimation();
                     botMessage.setText('');
+                }
                 fullText += update.delta;
                 botMessage.setText(fullText);
             }
@@ -239,6 +279,7 @@ class AiView extends St.BoxLayout {
 
         if (rawText.trim().startsWith('{')) {
             const parsed = this._extractContentFromJson(rawText);
+            this._stopThinkingAnimation();
             botMessage.setText(parsed);
             return parsed;
         }
@@ -282,11 +323,13 @@ class AiView extends St.BoxLayout {
 
         if (responseText.trim().startsWith('data:')) {
             const sseText = this._extractContentFromSseText(responseText);
+            this._stopThinkingAnimation();
             botMessage.setText(sseText);
             return sseText;
         }
 
         const content = this._extractContentFromJson(responseText);
+        this._stopThinkingAnimation();
         botMessage.setText(content);
         return content;
     }
