@@ -163,7 +163,7 @@ class AiView extends St.BoxLayout {
 
             if (statusCode < 200 || statusCode >= 300) {
                 const responseText = await this._readWholeStream(responseStream);
-                console.error(`AI Search Assistant: API error body: ${responseText.slice(0, 500)}`);
+                console.error(`AI Search Assistant: API request failed with HTTP ${statusCode} (${responseText.length} chars)`);
                 botMessage.setText(`Error (${statusCode}): ${responseText}`);
                 return;
             }
@@ -278,7 +278,7 @@ class AiView extends St.BoxLayout {
 
     async _readJsonResponse(responseStream, botMessage) {
         const responseText = await this._readWholeStream(responseStream);
-        console.log(`AI Search Assistant: Raw JSON response preview: ${responseText.slice(0, 500)}`);
+        console.log(`AI Search Assistant: Received non-SSE response (${responseText.length} chars)`);
 
         if (responseText.trim().startsWith('data:')) {
             const sseText = this._extractContentFromSseText(responseText);
@@ -671,7 +671,9 @@ class AiView extends St.BoxLayout {
 
     _buildRequestMessages(prompt) {
         const history = this._getTrimmedHistory();
-        const recall = this._recallRelevantMemory(prompt, this._maxRecallItems);
+        const recall = this._isPersistentMemoryEnabled()
+            ? this._recallRelevantMemory(prompt, this._maxRecallItems)
+            : [];
         return [
             ...recall,
             ...history,
@@ -697,8 +699,10 @@ class AiView extends St.BoxLayout {
         };
 
         this._conversationHistory.push({role: entry.role, content: entry.content});
-        this._allMemoryEntries.push(entry);
-        this._appendMemoryEntry(entry);
+        if (this._isPersistentMemoryEnabled()) {
+            this._allMemoryEntries.push(entry);
+            this._appendMemoryEntry(entry);
+        }
 
         const maxMessages = Math.max(1, this._maxHistoryTurns) * 2;
         if (this._conversationHistory.length > maxMessages)
@@ -714,6 +718,11 @@ class AiView extends St.BoxLayout {
     }
 
     _restoreConversationFromMemory() {
+        if (!this._isPersistentMemoryEnabled()) {
+            this._allMemoryEntries = [];
+            return;
+        }
+
         this._allMemoryEntries = this._loadMemoryEntries();
         if (this._allMemoryEntries.length === 0)
             return;
@@ -908,5 +917,20 @@ class AiView extends St.BoxLayout {
             set.add(token);
         }
         return set;
+    }
+
+    _isPersistentMemoryEnabled() {
+        return this._getSettingBoolean('memory-enabled', true);
+    }
+
+    _getSettingBoolean(key, fallback) {
+        if (!this._settings)
+            return fallback;
+
+        try {
+            return this._settings.get_boolean(key);
+        } catch (_e) {
+            return fallback;
+        }
     }
 });

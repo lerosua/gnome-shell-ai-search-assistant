@@ -217,7 +217,7 @@ export default class AiSearchAssistantExtension extends Extension {
         if (this._isAiMode && this._aiView)
             this._aiView.visible = true;
 
-        console.log(`AI Search Assistant: Submitting prompt (${prompt.length} chars): ${prompt.slice(0, 80)}`);
+        console.log(`AI Search Assistant: Submitting prompt (${prompt.length} chars)`);
 
         this._aiView.addMessage('You', prompt);
 

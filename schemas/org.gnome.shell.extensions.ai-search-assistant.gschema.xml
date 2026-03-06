@@ -21,5 +21,10 @@
       <summary>Sampling temperature</summary>
       <description>Controls randomness in model responses.</description>
     </key>
+    <key name="memory-enabled" type="b">
+      <default>true</default>
+      <summary>Enable persistent chat memory</summary>
+      <description>When enabled, user prompts and model replies are stored on disk and reloaded in later sessions.</description>
+    </key>
   </schema>
 </schemalist>

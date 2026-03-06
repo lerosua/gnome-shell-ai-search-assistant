@@ -1,6 +1,10 @@
 import Adw from 'gi://Adw';
 import Gtk from 'gi://Gtk';
+import GLib from 'gi://GLib';
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
+
+const MEMORY_DIRNAME = 'ai-search-assistant';
+const MEMORY_FILENAME = 'chat-history.jsonl';
 
 export default class AiSearchAssistantPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
@@ -43,6 +47,15 @@ export default class AiSearchAssistantPreferences extends ExtensionPreferences {
         });
 
         this._addTemperatureRow(group, settings);
+
+        const privacyGroup = new Adw.PreferencesGroup({
+            title: 'Privacy',
+            description: 'Control persistent memory and local chat history storage.'
+        });
+        page.add(privacyGroup);
+
+        this._addMemoryToggleRow(privacyGroup, settings);
+        this._addClearHistoryRow(privacyGroup);
     }
 
     _addEntryRow(group, settings, { title, subtitle, key, placeholder }) {
@@ -96,5 +109,67 @@ export default class AiSearchAssistantPreferences extends ExtensionPreferences {
         row.add_suffix(spin);
         row.activatable_widget = spin;
         group.add(row);
+    }
+
+    _addMemoryToggleRow(group, settings) {
+        const row = new Adw.ActionRow({
+            title: 'Persistent Memory',
+            subtitle: 'Store prompts and replies on disk for future sessions'
+        });
+
+        const toggle = new Gtk.Switch({
+            active: settings.get_boolean('memory-enabled'),
+            valign: Gtk.Align.CENTER
+        });
+
+        toggle.connect('state-set', (_widget, state) => {
+            settings.set_boolean('memory-enabled', state);
+            return false;
+        });
+
+        row.add_suffix(toggle);
+        row.activatable_widget = toggle;
+        group.add(row);
+    }
+
+    _addClearHistoryRow(group) {
+        const path = this._buildMemoryFilePath();
+        const row = new Adw.ActionRow({
+            title: 'Clear Stored History',
+            subtitle: `Delete local chat history at ${path}`
+        });
+
+        const button = new Gtk.Button({
+            label: 'Clear now',
+            valign: Gtk.Align.CENTER
+        });
+        button.add_css_class('destructive-action');
+        button.connect('clicked', () => {
+            const success = this._clearHistoryFile(path);
+            row.set_subtitle(success
+                ? `Cleared local chat history at ${path}`
+                : `No history file found at ${path}`);
+        });
+
+        row.add_suffix(button);
+        row.activatable = false;
+        group.add(row);
+    }
+
+    _buildMemoryFilePath() {
+        const stateDir = GLib.get_user_state_dir();
+        return GLib.build_filenamev([stateDir, MEMORY_DIRNAME, MEMORY_FILENAME]);
+    }
+
+    _clearHistoryFile(path) {
+        try {
+            if (!GLib.file_test(path, GLib.FileTest.EXISTS))
+                return false;
+
+            GLib.unlink(path);
+            return true;
+        } catch (_e) {
+            return false;
+        }
     }
 }
