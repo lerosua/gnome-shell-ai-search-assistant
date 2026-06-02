@@ -54,45 +54,17 @@ export default class AiSearchAssistantExtension extends Extension {
                 this._searchEntry.add_child(this._aiButton);
         }
 
-        // Intercept Enter at capture phase while in AI mode.
+        // Intercept AI-mode control keys at capture phase.
         this._stageSignal = global.stage.connect('captured-event', (_actor, event) => {
             if (!this._isAiMode)
                 return Clutter.EVENT_PROPAGATE;
 
             const eventType = event.type ? event.type() : event.type;
-            if (eventType !== Clutter.EventType.KEY_PRESS)
+            if (eventType !== Clutter.EventType.KEY_PRESS &&
+                eventType !== Clutter.EventType.KEY_RELEASE)
                 return Clutter.EVENT_PROPAGATE;
 
-            const key = event.get_key_symbol();
-
-            if (key === Clutter.KEY_Escape) {
-                this._toggleMode();
-                console.log('AI Search Assistant: Escape intercepted, switched to Search Mode');
-                return Clutter.EVENT_STOP;
-            }
-
-            if (key !== Clutter.KEY_Return && key !== Clutter.KEY_KP_Enter)
-                return Clutter.EVENT_PROPAGATE;
-
-            if (this._isSubmitting)
-                return Clutter.EVENT_STOP;
-
-            const focus = global.stage.get_key_focus?.();
-            const searchText = this._searchEntry?.clutter_text ?? null;
-            let isSearchFocus = false;
-            for (let actor = focus; actor; actor = actor.get_parent?.()) {
-                if (actor === searchText || actor === this._searchEntry) {
-                    isSearchFocus = true;
-                    break;
-                }
-            }
-
-            if (!isSearchFocus)
-                return Clutter.EVENT_PROPAGATE;
-
-            this._submitAiPrompt();
-            console.log('AI Search Assistant: Enter intercepted in AI mode');
-            return Clutter.EVENT_STOP;
+            return this._handleAiModeKeyEvent(event, eventType);
         });
 
         // Keep AI result UI visible in AI mode even when search text is cleared.
@@ -114,7 +86,46 @@ export default class AiSearchAssistantExtension extends Extension {
                     return GLib.SOURCE_REMOVE;
                 });
             });
+
+            this._searchKeyPressSignal = this._searchTextActor.connect('key-press-event', (_actor, event) => {
+                if (!this._isAiMode)
+                    return Clutter.EVENT_PROPAGATE;
+
+                return this._handleAiModeKeyEvent(event, Clutter.EventType.KEY_PRESS);
+            });
+
+            this._searchKeyReleaseSignal = this._searchTextActor.connect('key-release-event', (_actor, event) => {
+                if (!this._isAiMode)
+                    return Clutter.EVENT_PROPAGATE;
+
+                return this._handleAiModeKeyEvent(event, Clutter.EventType.KEY_RELEASE);
+            });
         }
+
+        this._overviewShowingSignal = Main.overview.connect('showing', () => {
+            if (!this._isAiMode || !this._aiView)
+                return;
+
+            GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                if (this._isAiMode && this._aiView) {
+                    this._syncModeVisibility();
+                    this._scheduleVisibilityReassertion();
+                }
+                return GLib.SOURCE_REMOVE;
+            });
+        });
+
+        this._overviewHiddenSignal = Main.overview.connect('hidden', () => {
+            if (this._isAiMode) {
+                this._setAiMode(false);
+                console.log('AI Search Assistant: Overview hidden, switched to Search Mode');
+            } else {
+                this._cancelVisibilityReassertion();
+            }
+
+            if (this._aiView)
+                this._aiView.visible = false;
+        });
 
         // Init AI View
         this._aiView = new AiView(this._settings);
@@ -181,7 +192,14 @@ export default class AiSearchAssistantExtension extends Extension {
     }
 
     _toggleMode() {
-        this._isAiMode = !this._isAiMode;
+        this._setAiMode(!this._isAiMode);
+    }
+
+    _setAiMode(isAiMode) {
+        if (this._isAiMode === isAiMode)
+            return false;
+
+        this._isAiMode = isAiMode;
 
         if (this._isAiMode) {
             if (this._aiButton)
@@ -202,7 +220,60 @@ export default class AiSearchAssistantExtension extends Extension {
         }
 
         this._syncModeVisibility();
-        this._scheduleVisibilityReassertion();
+        if (this._isAiMode)
+            this._scheduleVisibilityReassertion();
+        else
+            this._cancelVisibilityReassertion();
+
+        return true;
+    }
+
+    _exitAiMode(reason) {
+        if (!this._setAiMode(false))
+            return false;
+
+        console.log(`AI Search Assistant: ${reason}, switched to Search Mode`);
+        return true;
+    }
+
+    _handleAiModeKeyEvent(event, eventType) {
+        const key = event.get_key_symbol();
+
+        if (this._isOverviewToggleKey(key)) {
+            this._exitAiMode('Overview toggle key intercepted');
+            return Clutter.EVENT_PROPAGATE;
+        }
+
+        if (eventType !== Clutter.EventType.KEY_PRESS)
+            return Clutter.EVENT_PROPAGATE;
+
+        if (key === Clutter.KEY_Escape) {
+            this._exitAiMode('Escape intercepted');
+            return Clutter.EVENT_STOP;
+        }
+
+        if (key !== Clutter.KEY_Return && key !== Clutter.KEY_KP_Enter)
+            return Clutter.EVENT_PROPAGATE;
+
+        if (this._isSubmitting)
+            return Clutter.EVENT_STOP;
+
+        const focus = global.stage.get_key_focus?.();
+        const searchText = this._searchEntry?.clutter_text ?? null;
+        let isSearchFocus = false;
+        for (let actor = focus; actor; actor = actor.get_parent?.()) {
+            if (actor === searchText || actor === this._searchEntry) {
+                isSearchFocus = true;
+                break;
+            }
+        }
+
+        if (!isSearchFocus)
+            return Clutter.EVENT_PROPAGATE;
+
+        this._submitAiPrompt();
+        console.log('AI Search Assistant: Enter intercepted in AI mode');
+        return Clutter.EVENT_STOP;
     }
 
     async _submitAiPrompt() {
@@ -302,6 +373,11 @@ export default class AiSearchAssistantExtension extends Extension {
             return;
 
         if (this._isAiMode) {
+            if (!this._isOverviewTargetVisible()) {
+                this._aiView.visible = false;
+                return;
+            }
+
             this._aiView.visible = true;
             this._aiView.reactive = true;
             this._raiseAiView();
@@ -322,6 +398,22 @@ export default class AiSearchAssistantExtension extends Extension {
             searchActor.opacity = 255;
             searchActor.reactive = true;
         }
+    }
+
+    _isOverviewTargetVisible() {
+        if (Main.overview?.visibleTarget !== undefined)
+            return !!Main.overview.visibleTarget;
+
+        return !!Main.overview?.visible;
+    }
+
+    _isOverviewToggleKey(key) {
+        return key === Clutter.KEY_Super_L ||
+            key === Clutter.KEY_Super_R ||
+            key === Clutter.KEY_Meta_L ||
+            key === Clutter.KEY_Meta_R ||
+            key === Clutter.KEY_Hyper_L ||
+            key === Clutter.KEY_Hyper_R;
     }
 
     _raiseAiView() {
@@ -359,14 +451,17 @@ export default class AiSearchAssistantExtension extends Extension {
         if (!this._isAiMode || !this._aiView)
             return;
 
-        if (this._visibilityReassertionId) {
-            GLib.source_remove(this._visibilityReassertionId);
-            this._visibilityReassertionId = null;
-        }
+        this._cancelVisibilityReassertion();
 
         let retries = 6;
         this._visibilityReassertionId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 25, () => {
             if (!this._isAiMode || !this._aiView) {
+                this._visibilityReassertionId = null;
+                return GLib.SOURCE_REMOVE;
+            }
+
+            if (!this._isOverviewTargetVisible()) {
+                this._aiView.visible = false;
                 this._visibilityReassertionId = null;
                 return GLib.SOURCE_REMOVE;
             }
@@ -383,6 +478,14 @@ export default class AiSearchAssistantExtension extends Extension {
         });
     }
 
+    _cancelVisibilityReassertion() {
+        if (!this._visibilityReassertionId)
+            return;
+
+        GLib.source_remove(this._visibilityReassertionId);
+        this._visibilityReassertionId = null;
+    }
+
     disable() {
         console.log('AI Search Assistant: Disabling...');
 
@@ -397,10 +500,27 @@ export default class AiSearchAssistantExtension extends Extension {
             this._searchTextSignal = null;
         }
 
-        if (this._visibilityReassertionId) {
-            GLib.source_remove(this._visibilityReassertionId);
-            this._visibilityReassertionId = null;
+        if (this._searchKeyPressSignal && this._searchTextActor) {
+            this._searchTextActor.disconnect(this._searchKeyPressSignal);
+            this._searchKeyPressSignal = null;
         }
+
+        if (this._searchKeyReleaseSignal && this._searchTextActor) {
+            this._searchTextActor.disconnect(this._searchKeyReleaseSignal);
+            this._searchKeyReleaseSignal = null;
+        }
+
+        if (this._overviewShowingSignal) {
+            Main.overview.disconnect(this._overviewShowingSignal);
+            this._overviewShowingSignal = null;
+        }
+
+        if (this._overviewHiddenSignal) {
+            Main.overview.disconnect(this._overviewHiddenSignal);
+            this._overviewHiddenSignal = null;
+        }
+
+        this._cancelVisibilityReassertion();
 
         if (this._iconButtonSignal && this._searchEntry) {
             this._searchEntry.disconnect(this._iconButtonSignal);
