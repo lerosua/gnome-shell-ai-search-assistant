@@ -12,8 +12,16 @@ const DEFAULT_CHAT_MODEL = 'gpt-5-mini';
 const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_HISTORY_TURNS = 8;
 const DEFAULT_MAX_RECALL_ITEMS = 6;
+const DEFAULT_MAX_VISIBLE_MESSAGES = 2;
 const MEMORY_DIRNAME = 'ai-search-assistant';
 const MEMORY_FILENAME = 'chat-history.jsonl';
+const MAX_DISPLAY_CHARS = 24000;
+const MAX_RENDER_BLOCKS = 800;
+const MAX_STREAM_FALLBACK_CHARS = 65536;
+const MAX_WHOLE_RESPONSE_CHARS = 65536;
+const STREAM_RENDER_INTERVAL_MS = 80;
+const STREAM_RENDER_CHAR_DELTA = 512;
+const TRUNCATED_NOTICE = '\n\n[Output truncated to keep GNOME Shell responsive.]';
 
 export const AiView = GObject.registerClass(
 class AiView extends St.BoxLayout {
@@ -34,6 +42,8 @@ class AiView extends St.BoxLayout {
         this._conversationHistory = [];
         this._maxHistoryTurns = DEFAULT_MAX_HISTORY_TURNS;
         this._maxRecallItems = DEFAULT_MAX_RECALL_ITEMS;
+        this._maxVisibleMessages = DEFAULT_MAX_VISIBLE_MESSAGES;
+        this._visibleMessages = [];
         this._memoryFilePath = this._buildMemoryFilePath();
         this._allMemoryEntries = [];
         this._currentSessionId = `${Date.now()}`;
@@ -102,29 +112,65 @@ class AiView extends St.BoxLayout {
         });
         msgBox.add_child(bodyBox);
 
-        this._contentBox.add_child(msgBox);
-
         const message = {
             sender,
+            actor: msgBox,
             bodyBox,
             text: '',
+            renderMode: null,
+            plainLabel: null,
             setText: value => {
-                message.text = value ?? '';
+                const nextText = this._limitDisplayText(value);
+                if (message.renderMode === 'markdown' && message.text === nextText)
+                    return;
+
+                message.text = nextText;
+                message.renderMode = 'markdown';
+                message.plainLabel = null;
                 this._renderMarkdownToBox(bodyBox, message.text);
+                this._scrollToBottom();
+            },
+            setPlainText: value => {
+                const nextText = this._limitDisplayText(value);
+                if (message.renderMode === 'plain' && message.text === nextText)
+                    return;
+
+                message.text = nextText;
+                message.renderMode = 'plain';
+
+                if (!message.plainLabel) {
+                    for (const child of bodyBox.get_children())
+                        child.destroy();
+
+                    message.plainLabel = this._createTextLabel('ai-message-text', message.text);
+                    bodyBox.add_child(message.plainLabel);
+                } else {
+                    message.plainLabel.clutter_text.set_text(message.text);
+                }
+
                 this._scrollToBottom();
             },
             appendText: value => {
                 if (!value)
                     return;
-                message.text += value;
-                this._renderMarkdownToBox(bodyBox, message.text);
-                this._scrollToBottom();
+                message.setText(`${message.text}${value}`);
             }
         };
 
+        this._contentBox.add_child(msgBox);
+        this._visibleMessages.push(message);
+        this._trimVisibleMessages();
         message.setText(text ?? '');
 
         return message;
+    }
+
+    _trimVisibleMessages() {
+        const maxMessages = Math.max(1, this._maxVisibleMessages | 0);
+        while (this._visibleMessages.length > maxMessages) {
+            const oldMessage = this._visibleMessages.shift();
+            oldMessage?.actor?.destroy?.();
+        }
     }
 
     async generateResponse(prompt) {
@@ -227,14 +273,37 @@ class AiView extends St.BoxLayout {
 
         let buffer = '';
         let fullText = '';
+        let fullTextTruncated = false;
         let rawText = '';
+        let lastRenderedAt = 0;
+        let lastRenderedLength = 0;
+
+        const renderStreamText = force => {
+            const displayText = this._formatLimitedText(fullText, fullTextTruncated);
+            const now = GLib.get_monotonic_time();
+            if (!force &&
+                displayText.length - lastRenderedLength < STREAM_RENDER_CHAR_DELTA &&
+                now - lastRenderedAt < STREAM_RENDER_INTERVAL_MS * 1000)
+                return;
+
+            botMessage.setPlainText(displayText);
+            lastRenderedAt = now;
+            lastRenderedLength = displayText.length;
+        };
+
+        const finishStreamText = () => {
+            const displayText = this._formatLimitedText(fullText, fullTextTruncated);
+            botMessage.setText(displayText);
+            return displayText;
+        };
+
         while (true) {
             const bytes = await this._readBytesAsync(responseStream, 4096);
             if (bytes === null || bytes.get_size() === 0)
                 break;
 
             const chunk = this._decodeBytes(bytes);
-            rawText += chunk;
+            rawText = this._appendLimitedText(rawText, chunk, MAX_STREAM_FALLBACK_CHARS).text;
             buffer += chunk.replace(/\r\n/g, '\n');
 
             while (true) {
@@ -247,7 +316,7 @@ class AiView extends St.BoxLayout {
                 const update = this._extractStreamDelta(block);
 
                 if (update.done)
-                    return fullText;
+                    return finishStreamText();
 
                 if (!update.delta)
                     continue;
@@ -257,8 +326,10 @@ class AiView extends St.BoxLayout {
                     botMessage.setText('');
                 }
 
-                fullText += update.delta;
-                botMessage.setText(fullText);
+                const limited = this._appendLimitedText(fullText, update.delta, MAX_DISPLAY_CHARS);
+                fullText = limited.text;
+                fullTextTruncated = fullTextTruncated || limited.truncated;
+                renderStreamText(false);
             }
         }
 
@@ -269,16 +340,17 @@ class AiView extends St.BoxLayout {
                     this._stopThinkingAnimation();
                     botMessage.setText('');
                 }
-                fullText += update.delta;
-                botMessage.setText(fullText);
+                const limited = this._appendLimitedText(fullText, update.delta, MAX_DISPLAY_CHARS);
+                fullText = limited.text;
+                fullTextTruncated = fullTextTruncated || limited.truncated;
             }
         }
 
         if (fullText.length > 0)
-            return fullText;
+            return finishStreamText();
 
         if (rawText.trim().startsWith('{')) {
-            const parsed = this._extractContentFromJson(rawText);
+            const parsed = this._limitDisplayText(this._extractContentFromJson(rawText));
             this._stopThinkingAnimation();
             botMessage.setText(parsed);
             return parsed;
@@ -322,13 +394,13 @@ class AiView extends St.BoxLayout {
         console.log(`AI Search Assistant: Received non-SSE response (${responseText.length} chars)`);
 
         if (responseText.trim().startsWith('data:')) {
-            const sseText = this._extractContentFromSseText(responseText);
+            const sseText = this._limitDisplayText(this._extractContentFromSseText(responseText));
             this._stopThinkingAnimation();
             botMessage.setText(sseText);
             return sseText;
         }
 
-        const content = this._extractContentFromJson(responseText);
+        const content = this._limitDisplayText(this._extractContentFromJson(responseText));
         this._stopThinkingAnimation();
         botMessage.setText(content);
         return content;
@@ -402,15 +474,19 @@ class AiView extends St.BoxLayout {
 
     async _readWholeStream(stream) {
         let text = '';
+        let truncated = false;
 
         while (true) {
             const bytes = await this._readBytesAsync(stream, 4096);
             if (bytes === null || bytes.get_size() === 0)
                 break;
-            text += this._decodeBytes(bytes);
+
+            const limited = this._appendLimitedText(text, this._decodeBytes(bytes), MAX_WHOLE_RESPONSE_CHARS);
+            text = limited.text;
+            truncated = truncated || limited.truncated;
         }
 
-        return text.trim();
+        return this._formatLimitedText(text, truncated).trim();
     }
 
     _decodeBytes(bytes) {
@@ -500,6 +576,18 @@ class AiView extends St.BoxLayout {
         let paragraph = [];
         let inCode = false;
         let codeLines = [];
+        let renderedBlocks = 0;
+        let renderingTruncated = false;
+
+        const addMarkupLabel = (styleClass, markup) => {
+            if (renderedBlocks >= MAX_RENDER_BLOCKS) {
+                renderingTruncated = true;
+                return;
+            }
+
+            container.add_child(this._createMarkupLabel(styleClass, markup));
+            renderedBlocks++;
+        };
 
         const flushParagraph = () => {
             if (paragraph.length === 0)
@@ -507,7 +595,7 @@ class AiView extends St.BoxLayout {
             const text = paragraph.join(' ').trim();
             paragraph = [];
             if (text.length > 0)
-                container.add_child(this._createMarkupLabel('ai-message-text', this._inlineMarkdownToMarkup(text)));
+                addMarkupLabel('ai-message-text', this._inlineMarkdownToMarkup(text));
         };
 
         const flushCode = () => {
@@ -516,10 +604,13 @@ class AiView extends St.BoxLayout {
             const codeText = codeLines.join('\n');
             codeLines = [];
             const escaped = GLib.markup_escape_text(codeText, -1);
-            container.add_child(this._createMarkupLabel('ai-message-code', `<tt>${escaped}</tt>`));
+            addMarkupLabel('ai-message-code', `<tt>${escaped}</tt>`);
         };
 
         for (const line of lines) {
+            if (renderingTruncated)
+                break;
+
             const codeFence = line.trim().startsWith('```');
             if (codeFence) {
                 flushParagraph();
@@ -547,7 +638,7 @@ class AiView extends St.BoxLayout {
                 flushParagraph();
                 const level = heading[1].length;
                 const text = this._inlineMarkdownToMarkup(heading[2].trim());
-                container.add_child(this._createMarkupLabel(`ai-message-h${level}`, `<b>${text}</b>`));
+                addMarkupLabel(`ai-message-h${level}`, `<b>${text}</b>`);
                 continue;
             }
 
@@ -555,7 +646,7 @@ class AiView extends St.BoxLayout {
             if (unordered) {
                 flushParagraph();
                 const item = this._inlineMarkdownToMarkup(unordered[1].trim());
-                container.add_child(this._createMarkupLabel('ai-message-list', `- ${item}`));
+                addMarkupLabel('ai-message-list', `- ${item}`);
                 continue;
             }
 
@@ -563,7 +654,7 @@ class AiView extends St.BoxLayout {
             if (ordered) {
                 flushParagraph();
                 const item = this._inlineMarkdownToMarkup(ordered[1].trim());
-                container.add_child(this._createMarkupLabel('ai-message-list', `1. ${item}`));
+                addMarkupLabel('ai-message-list', `1. ${item}`);
                 continue;
             }
 
@@ -571,7 +662,7 @@ class AiView extends St.BoxLayout {
             if (quote) {
                 flushParagraph();
                 const item = this._inlineMarkdownToMarkup(quote[1].trim());
-                container.add_child(this._createMarkupLabel('ai-message-quote', item));
+                addMarkupLabel('ai-message-quote', item);
                 continue;
             }
 
@@ -581,6 +672,11 @@ class AiView extends St.BoxLayout {
         flushParagraph();
         if (inCode)
             flushCode();
+
+        if (renderingTruncated) {
+            const escaped = GLib.markup_escape_text(TRUNCATED_NOTICE.trim(), -1);
+            container.add_child(this._createMarkupLabel('ai-message-text', escaped));
+        }
     }
 
     _createMarkupLabel(styleClass, markup) {
@@ -590,10 +686,7 @@ class AiView extends St.BoxLayout {
             x_align: Clutter.ActorAlign.START
         });
 
-        label.clutter_text.line_wrap = true;
-        const wrapMode = Pango.WrapMode ?? Pango.LineWrapMode;
-        if (wrapMode && wrapMode.WORD_CHAR !== undefined)
-            label.clutter_text.line_wrap_mode = wrapMode.WORD_CHAR;
+        this._configureWrappedText(label);
 
         try {
             label.clutter_text.connect('activate-link', (_text, uri) => {
@@ -606,6 +699,52 @@ class AiView extends St.BoxLayout {
 
         label.clutter_text.set_markup(markup);
         return label;
+    }
+
+    _createTextLabel(styleClass, text) {
+        const label = new St.Label({
+            style_class: styleClass,
+            x_expand: true,
+            x_align: Clutter.ActorAlign.START
+        });
+
+        this._configureWrappedText(label);
+        label.clutter_text.set_text(String(text ?? ''));
+        return label;
+    }
+
+    _configureWrappedText(label) {
+        label.clutter_text.line_wrap = true;
+        const wrapMode = Pango.WrapMode ?? Pango.LineWrapMode;
+        if (wrapMode && wrapMode.WORD_CHAR !== undefined)
+            label.clutter_text.line_wrap_mode = wrapMode.WORD_CHAR;
+    }
+
+    _limitDisplayText(value) {
+        const limited = this._appendLimitedText('', value, MAX_DISPLAY_CHARS);
+        return this._formatLimitedText(limited.text, limited.truncated);
+    }
+
+    _appendLimitedText(current, addition, maxChars) {
+        const base = String(current ?? '');
+        const extra = String(addition ?? '');
+        const limit = Math.max(0, maxChars | 0);
+
+        if (limit === 0)
+            return {text: '', truncated: base.length > 0 || extra.length > 0};
+
+        if (base.length >= limit)
+            return {text: base.slice(0, limit), truncated: extra.length > 0 || base.length > limit};
+
+        const combined = `${base}${extra}`;
+        if (combined.length <= limit)
+            return {text: combined, truncated: false};
+
+        return {text: combined.slice(0, limit), truncated: true};
+    }
+
+    _formatLimitedText(text, truncated) {
+        return truncated ? `${text}${TRUNCATED_NOTICE}` : String(text ?? '');
     }
 
     _inlineMarkdownToMarkup(text) {
@@ -730,7 +869,7 @@ class AiView extends St.BoxLayout {
     }
 
     _appendHistoryEntry(role, content) {
-        const text = String(content ?? '').trim();
+        const text = this._limitDisplayText(content).trim();
         if (!text)
             return;
 
@@ -796,11 +935,8 @@ class AiView extends St.BoxLayout {
             return;
 
         const lastSessionEntries = bySession.get(latestSessionId) ?? [];
-        for (const entry of lastSessionEntries) {
-            const sender = this._roleToSender(entry.role);
-            this.addMessage(sender, entry.content);
+        for (const entry of lastSessionEntries)
             this._conversationHistory.push({role: entry.role, content: entry.content});
-        }
 
         const maxMessages = Math.max(1, this._maxHistoryTurns) * 2;
         if (this._conversationHistory.length > maxMessages)
