@@ -13,6 +13,9 @@ const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_HISTORY_TURNS = 8;
 const DEFAULT_MAX_RECALL_ITEMS = 6;
 const DEFAULT_MAX_VISIBLE_MESSAGES = 2;
+const MAX_HISTORY_SESSIONS = 60;
+const HISTORY_TITLE_CHARS = 96;
+const HISTORY_PREVIEW_CHARS = 180;
 const MEMORY_DIRNAME = 'ai-search-assistant';
 const MEMORY_FILENAME = 'chat-history.jsonl';
 const MAX_DISPLAY_CHARS = 24000;
@@ -49,6 +52,8 @@ class AiView extends St.BoxLayout {
         this._currentSessionId = `${Date.now()}`;
         this._sessionGeneration = 0;
         this._thinkingAnimationId = null;
+        this._activeTab = 'chat';
+        this._selectedHistorySessionId = null;
 
         this.connect('destroy', () => {
             this._stopThinkingAnimation();
@@ -93,6 +98,17 @@ class AiView extends St.BoxLayout {
         });
         this._headerRow.add_child(this._newSessionButton);
 
+        this._tabRow = new St.BoxLayout({
+            style_class: 'ai-view-tabs',
+            x_expand: true
+        });
+        this.add_child(this._tabRow);
+
+        this._chatTabButton = this._createTabButton('Chat', 'chat');
+        this._historyTabButton = this._createTabButton('History', 'history');
+        this._tabRow.add_child(this._chatTabButton);
+        this._tabRow.add_child(this._historyTabButton);
+
         // Scroll View for Chat
         this._scrollView = new St.ScrollView({
             style_class: 'ai-view-scroll',
@@ -111,12 +127,34 @@ class AiView extends St.BoxLayout {
         });
         this._scrollView.set_child(this._contentBox);
 
+        this._historyScrollView = new St.ScrollView({
+            style_class: 'ai-view-scroll ai-history-scroll',
+            hscrollbar_policy: St.PolicyType.NEVER,
+            vscrollbar_policy: St.PolicyType.AUTOMATIC,
+            x_expand: true,
+            y_expand: true,
+            visible: false
+        });
+        this.add_child(this._historyScrollView);
+
+        this._historyBox = new St.BoxLayout({
+            style_class: 'ai-history-content',
+            vertical: true,
+            x_expand: true
+        });
+        this._historyScrollView.set_child(this._historyBox);
+
         this._restoreConversationFromMemory();
         if (this._conversationHistory.length === 0)
             this.addMessage('System', 'Hello! Click the search button to toggle AI mode.');
+
+        this._syncTabState();
     }
 
     addMessage(sender, text) {
+        if (this._activeTab !== 'chat')
+            this._setActiveTab('chat');
+
         const msgBox = new St.BoxLayout({
             style_class: 'ai-message-box',
             vertical: true
@@ -196,6 +234,56 @@ class AiView extends St.BoxLayout {
         return message;
     }
 
+    _createTabButton(label, tab) {
+        const button = new St.Button({
+            style_class: 'ai-tab-button',
+            can_focus: true,
+            track_hover: true,
+            x_expand: true,
+            accessible_name: label
+        });
+        button.set_child(new St.Label({
+            text: label,
+            x_align: Clutter.ActorAlign.CENTER
+        }));
+        button.connect('clicked', () => {
+            this._setActiveTab(tab);
+        });
+        return button;
+    }
+
+    _setActiveTab(tab) {
+        if (tab !== 'chat' && tab !== 'history')
+            return;
+
+        this._activeTab = tab;
+        if (tab === 'history')
+            this._refreshHistoryView();
+
+        this._syncTabState();
+    }
+
+    _syncTabState() {
+        if (this._scrollView)
+            this._scrollView.visible = this._activeTab === 'chat';
+        if (this._historyScrollView)
+            this._historyScrollView.visible = this._activeTab === 'history';
+
+        if (this._chatTabButton) {
+            if (this._activeTab === 'chat')
+                this._chatTabButton.add_style_pseudo_class('checked');
+            else
+                this._chatTabButton.remove_style_pseudo_class('checked');
+        }
+
+        if (this._historyTabButton) {
+            if (this._activeTab === 'history')
+                this._historyTabButton.add_style_pseudo_class('checked');
+            else
+                this._historyTabButton.remove_style_pseudo_class('checked');
+        }
+    }
+
     _trimVisibleMessages() {
         const maxMessages = Math.max(1, this._maxVisibleMessages | 0);
         while (this._visibleMessages.length > maxMessages) {
@@ -211,6 +299,8 @@ class AiView extends St.BoxLayout {
         this._sessionGeneration++;
         this._currentSessionId = `${Date.now()}`;
         this._conversationHistory = [];
+        this._selectedHistorySessionId = null;
+        this._setActiveTab('chat');
 
         for (const message of this._visibleMessages) {
             message.disposed = true;
@@ -945,6 +1035,9 @@ class AiView extends St.BoxLayout {
         const maxMessages = Math.max(1, this._maxHistoryTurns) * 2;
         if (this._conversationHistory.length > maxMessages)
             this._conversationHistory.splice(0, this._conversationHistory.length - maxMessages);
+
+        if (this._activeTab === 'history')
+            this._refreshHistoryView();
     }
 
     _getTrimmedHistory() {
@@ -953,6 +1046,209 @@ class AiView extends St.BoxLayout {
             return [...this._conversationHistory];
 
         return this._conversationHistory.slice(this._conversationHistory.length - maxMessages);
+    }
+
+    _refreshHistoryView() {
+        if (!this._historyBox)
+            return;
+
+        this._clearChildren(this._historyBox);
+
+        if (!this._isPersistentMemoryEnabled()) {
+            this._renderHistoryEmptyState('Persistent memory is disabled.');
+            return;
+        }
+
+        this._allMemoryEntries = this._loadMemoryEntries();
+        const sessions = this._buildHistorySessions(this._allMemoryEntries);
+        if (sessions.length === 0) {
+            this._renderHistoryEmptyState('No saved conversations yet.');
+            return;
+        }
+
+        if (this._selectedHistorySessionId) {
+            const selected = sessions.find(session => session.id === this._selectedHistorySessionId);
+            if (selected) {
+                this._renderHistorySession(selected);
+                return;
+            }
+            this._selectedHistorySessionId = null;
+        }
+
+        this._renderHistoryList(sessions);
+    }
+
+    _renderHistoryEmptyState(text) {
+        const box = new St.BoxLayout({
+            style_class: 'ai-history-empty',
+            vertical: true,
+            x_expand: true
+        });
+        box.add_child(this._createTextLabel('ai-history-empty-title', text));
+        this._historyBox.add_child(box);
+    }
+
+    _renderHistoryList(sessions) {
+        const summary = this._createTextLabel(
+            'ai-history-summary',
+            `${sessions.length} saved conversation${sessions.length === 1 ? '' : 's'}`
+        );
+        this._historyBox.add_child(summary);
+
+        for (const session of sessions.slice(0, MAX_HISTORY_SESSIONS)) {
+            const row = new St.Button({
+                style_class: 'ai-history-row',
+                can_focus: true,
+                track_hover: true,
+                x_expand: true
+            });
+
+            const rowBox = new St.BoxLayout({
+                style_class: 'ai-history-row-content',
+                vertical: true,
+                x_expand: true
+            });
+
+            rowBox.add_child(this._createTextLabel('ai-history-title', session.title));
+            rowBox.add_child(this._createTextLabel(
+                'ai-history-meta',
+                `${this._formatTimestamp(session.latestTs)} · ${session.entries.length} messages`
+            ));
+
+            if (session.preview)
+                rowBox.add_child(this._createTextLabel('ai-history-preview', session.preview));
+
+            row.set_child(rowBox);
+            row.connect('clicked', () => {
+                this._selectedHistorySessionId = session.id;
+                this._refreshHistoryView();
+            });
+            this._historyBox.add_child(row);
+        }
+    }
+
+    _renderHistorySession(session) {
+        const header = new St.BoxLayout({
+            style_class: 'ai-history-detail-header',
+            x_expand: true
+        });
+
+        const backButton = new St.Button({
+            style_class: 'ai-history-back-button',
+            can_focus: true,
+            track_hover: true,
+            accessible_name: 'Back to history'
+        });
+        const backContent = new St.BoxLayout({
+            style_class: 'ai-history-back-content'
+        });
+        backContent.add_child(new St.Icon({
+            icon_name: 'go-previous-symbolic',
+            style_class: 'ai-history-back-icon'
+        }));
+        backContent.add_child(new St.Label({text: 'History'}));
+        backButton.set_child(backContent);
+        backButton.connect('clicked', () => {
+            this._selectedHistorySessionId = null;
+            this._refreshHistoryView();
+        });
+        header.add_child(backButton);
+
+        const titleBox = new St.BoxLayout({
+            style_class: 'ai-history-detail-title-box',
+            vertical: true,
+            x_expand: true
+        });
+        titleBox.add_child(this._createTextLabel('ai-history-detail-title', session.title));
+        titleBox.add_child(this._createTextLabel(
+            'ai-history-meta',
+            `${this._formatTimestamp(session.latestTs)} · ${session.entries.length} messages`
+        ));
+        header.add_child(titleBox);
+        this._historyBox.add_child(header);
+
+        for (const entry of session.entries) {
+            const msgBox = new St.BoxLayout({
+                style_class: 'ai-history-message-box',
+                vertical: true,
+                x_expand: true
+            });
+            msgBox.add_child(this._createTextLabel('ai-message-sender', this._roleToSender(entry.role)));
+
+            const bodyBox = new St.BoxLayout({
+                style_class: 'ai-message-body',
+                vertical: true,
+                x_expand: true
+            });
+            msgBox.add_child(bodyBox);
+            this._renderMarkdownToBox(bodyBox, this._limitDisplayText(entry.content));
+            this._historyBox.add_child(msgBox);
+        }
+    }
+
+    _buildHistorySessions(entries) {
+        const bySession = new Map();
+        for (const entry of entries) {
+            const sessionId = String(entry.sessionId ?? '').trim();
+            const content = String(entry.content ?? '').trim();
+            if (!sessionId || !content)
+                continue;
+
+            if (!bySession.has(sessionId))
+                bySession.set(sessionId, []);
+
+            bySession.get(sessionId).push({
+                role: entry.role,
+                content,
+                ts: Number(entry.ts ?? 0),
+                sessionId
+            });
+        }
+
+        const sessions = [];
+        for (const [sessionId, sessionEntries] of bySession.entries()) {
+            sessionEntries.sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+            const firstUser = sessionEntries.find(entry => entry.role === 'user') ?? sessionEntries[0];
+            const firstAssistant = sessionEntries.find(entry => entry.role === 'assistant');
+            const latestTs = sessionEntries[sessionEntries.length - 1]?.ts ?? 0;
+            sessions.push({
+                id: sessionId,
+                title: this._summarizeText(firstUser?.content ?? 'Untitled conversation', HISTORY_TITLE_CHARS),
+                preview: this._summarizeText(firstAssistant?.content ?? '', HISTORY_PREVIEW_CHARS),
+                latestTs,
+                entries: sessionEntries
+            });
+        }
+
+        sessions.sort((a, b) => (b.latestTs ?? 0) - (a.latestTs ?? 0));
+        return sessions;
+    }
+
+    _summarizeText(text, maxChars) {
+        const normalized = String(text ?? '').replace(/\s+/g, ' ').trim();
+        const limit = Math.max(1, maxChars | 0);
+        if (normalized.length <= limit)
+            return normalized;
+
+        return `${normalized.slice(0, limit - 1)}…`;
+    }
+
+    _formatTimestamp(ts) {
+        const value = Number(ts ?? 0);
+        if (!Number.isFinite(value) || value <= 0)
+            return 'Unknown time';
+
+        try {
+            const dateTime = GLib.DateTime.new_from_unix_local(Math.floor(value / 1000));
+            return dateTime.format('%Y-%m-%d %H:%M');
+        } catch (_e) {
+            return 'Unknown time';
+        }
+    }
+
+    _clearChildren(container) {
+        for (const child of container.get_children())
+            child.destroy();
     }
 
     _restoreConversationFromMemory() {
