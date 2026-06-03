@@ -33,12 +33,33 @@
     spacing: 12px;
 }
 
+.ai-view-header-row {
+    padding-bottom: 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+}
+
 .ai-view-header {
     font-size: 1.5em;
     font-weight: bold;
     color: #ffffff;
-    padding-bottom: 12px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.ai-new-session-button {
+    padding: 6px;
+    border-radius: 8px;
+}
+
+.ai-new-session-button:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.ai-new-session-button:active {
+    background-color: rgba(255, 255, 255, 0.16);
+}
+
+.ai-new-session-icon {
+    icon-size: 1.1em;
+    color: #ffffff;
 }
 
 .ai-view-scroll {

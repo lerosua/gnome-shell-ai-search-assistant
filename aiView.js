@@ -47,6 +47,7 @@ class AiView extends St.BoxLayout {
         this._memoryFilePath = this._buildMemoryFilePath();
         this._allMemoryEntries = [];
         this._currentSessionId = `${Date.now()}`;
+        this._sessionGeneration = 0;
         this._thinkingAnimationId = null;
 
         this.connect('destroy', () => {
@@ -61,13 +62,36 @@ class AiView extends St.BoxLayout {
             this._textDecoder = null;
         }
 
-        // Header
+        this._headerRow = new St.BoxLayout({
+            style_class: 'ai-view-header-row',
+            x_expand: true
+        });
+        this.add_child(this._headerRow);
+
         this._header = new St.Label({
             text: 'AI Assistant',
             style_class: 'ai-view-header',
+            x_expand: true,
             x_align: Clutter.ActorAlign.CENTER
         });
-        this.add_child(this._header);
+        this._headerRow.add_child(this._header);
+
+        this._newSessionButton = new St.Button({
+            style_class: 'ai-new-session-button',
+            can_focus: true,
+            track_hover: true,
+            accessible_name: 'New conversation',
+            x_align: Clutter.ActorAlign.END,
+            y_align: Clutter.ActorAlign.CENTER
+        });
+        this._newSessionButton.set_child(new St.Icon({
+            icon_name: 'document-new-symbolic',
+            style_class: 'ai-new-session-icon'
+        }));
+        this._newSessionButton.connect('clicked', () => {
+            this._startNewConversation();
+        });
+        this._headerRow.add_child(this._newSessionButton);
 
         // Scroll View for Chat
         this._scrollView = new St.ScrollView({
@@ -119,7 +143,11 @@ class AiView extends St.BoxLayout {
             text: '',
             renderMode: null,
             plainLabel: null,
+            disposed: false,
             setText: value => {
+                if (message.disposed)
+                    return;
+
                 const nextText = this._limitDisplayText(value);
                 if (message.renderMode === 'markdown' && message.text === nextText)
                     return;
@@ -131,6 +159,9 @@ class AiView extends St.BoxLayout {
                 this._scrollToBottom();
             },
             setPlainText: value => {
+                if (message.disposed)
+                    return;
+
                 const nextText = this._limitDisplayText(value);
                 if (message.renderMode === 'plain' && message.text === nextText)
                     return;
@@ -169,11 +200,27 @@ class AiView extends St.BoxLayout {
         const maxMessages = Math.max(1, this._maxVisibleMessages | 0);
         while (this._visibleMessages.length > maxMessages) {
             const oldMessage = this._visibleMessages.shift();
+            if (oldMessage)
+                oldMessage.disposed = true;
             oldMessage?.actor?.destroy?.();
         }
     }
 
+    _startNewConversation() {
+        this._stopThinkingAnimation();
+        this._sessionGeneration++;
+        this._currentSessionId = `${Date.now()}`;
+        this._conversationHistory = [];
+
+        for (const message of this._visibleMessages) {
+            message.disposed = true;
+            message.actor?.destroy?.();
+        }
+        this._visibleMessages = [];
+    }
+
     async generateResponse(prompt) {
+        const generation = this._sessionGeneration;
         const botMessage = this.addMessage('AI', '');
         this._startThinkingAnimation(botMessage);
         const apiKey = this._getApiKey();
@@ -216,6 +263,9 @@ class AiView extends St.BoxLayout {
 
             if (statusCode < 200 || statusCode >= 300) {
                 const responseText = await this._readWholeStream(responseStream);
+                if (generation !== this._sessionGeneration)
+                    return;
+
                 console.error(`AI Search Assistant: API request failed with HTTP ${statusCode} (${responseText.length} chars)`);
                 this._stopThinkingAnimation();
                 botMessage.setText(`Error (${statusCode}): ${responseText}`);
@@ -223,6 +273,9 @@ class AiView extends St.BoxLayout {
             }
 
             const streamResult = await this._readStreamResponse(responseStream, contentType, botMessage);
+            if (generation !== this._sessionGeneration)
+                return;
+
             this._stopThinkingAnimation();
             const content = streamResult.trim();
             if (!content) {
@@ -234,6 +287,9 @@ class AiView extends St.BoxLayout {
             }
             
         } catch (e) {
+            if (generation !== this._sessionGeneration)
+                return;
+
             console.error('AI Search Assistant: Request failed', e);
             this._stopThinkingAnimation();
             botMessage.setText(`Error: ${e.message}`);
