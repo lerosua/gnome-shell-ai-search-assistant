@@ -25,6 +25,22 @@ const MAX_WHOLE_RESPONSE_CHARS = 65536;
 const STREAM_RENDER_INTERVAL_MS = 80;
 const STREAM_RENDER_CHAR_DELTA = 512;
 const TRUNCATED_NOTICE = '\n\n[Output truncated to keep GNOME Shell responsive.]';
+const debug = false;
+
+function debugLog(...args) {
+    if (debug)
+        console.log(...args);
+}
+
+function debugWarn(...args) {
+    if (debug)
+        console.warn(...args);
+}
+
+function debugError(...args) {
+    if (debug)
+        console.error(...args);
+}
 
 export const AiView = GObject.registerClass(
 class AiView extends St.BoxLayout {
@@ -320,13 +336,13 @@ class AiView extends St.BoxLayout {
         const temperature = this._getSettingDouble('temperature', DEFAULT_TEMPERATURE);
         const requestMessages = this._buildRequestMessages(prompt);
 
-        console.log(`AI Search Assistant: Preparing API request to ${apiUrl}`);
-        console.log(`AI Search Assistant: Model=${model}, temperature=${temperature}, promptLength=${prompt.length}, messages=${requestMessages.length}`);
+        debugLog(`AI Search Assistant: Preparing API request to ${apiUrl}`);
+        debugLog(`AI Search Assistant: Model=${model}, temperature=${temperature}, promptLength=${prompt.length}, messages=${requestMessages.length}`);
 
         if (!apiKey) {
             this._stopThinkingAnimation();
             botMessage.setText('Error: Missing API key in settings (api-key) or YUNWU_API_KEY');
-            console.error('AI Search Assistant: Missing API key, request not sent');
+            debugError('AI Search Assistant: Missing API key, request not sent');
             return;
         }
 
@@ -349,14 +365,14 @@ class AiView extends St.BoxLayout {
             const responseStream = await this._sendMessageAsync(msg);
             const statusCode = msg.status_code ?? msg.get_status?.() ?? 0;
             const contentType = (msg.response_headers.get_one('Content-Type') ?? '').toLowerCase();
-            console.log(`AI Search Assistant: API response status=${statusCode}, content-type=${contentType}`);
+            debugLog(`AI Search Assistant: API response status=${statusCode}, content-type=${contentType}`);
 
             if (statusCode < 200 || statusCode >= 300) {
                 const responseText = await this._readWholeStream(responseStream);
                 if (generation !== this._sessionGeneration)
                     return;
 
-                console.error(`AI Search Assistant: API request failed with HTTP ${statusCode} (${responseText.length} chars)`);
+                debugError(`AI Search Assistant: API request failed with HTTP ${statusCode} (${responseText.length} chars)`);
                 this._stopThinkingAnimation();
                 botMessage.setText(`Error (${statusCode}): ${responseText}`);
                 return;
@@ -369,18 +385,18 @@ class AiView extends St.BoxLayout {
             this._stopThinkingAnimation();
             const content = streamResult.trim();
             if (!content) {
-                console.error('AI Search Assistant: Empty model content after parsing response');
+                debugError('AI Search Assistant: Empty model content after parsing response');
                 botMessage.setText('Error: Empty response from model');
             } else {
                 this._rememberConversation(prompt, content);
-                console.log(`AI Search Assistant: Response parsed successfully (${content.length} chars)`);
+                debugLog(`AI Search Assistant: Response parsed successfully (${content.length} chars)`);
             }
             
         } catch (e) {
             if (generation !== this._sessionGeneration)
                 return;
 
-            console.error('AI Search Assistant: Request failed', e);
+            debugError('AI Search Assistant: Request failed', e);
             this._stopThinkingAnimation();
             botMessage.setText(`Error: ${e.message}`);
         }
@@ -520,7 +536,7 @@ class AiView extends St.BoxLayout {
                         // HTTP/2 NO_ERROR during initial send is extremely
                         // unlikely but handle it defensively.
                         if (msg.includes('NO_ERROR') || msg.includes('no error')) {
-                            console.warn('AI Search Assistant: HTTP/2 stream closed during send (NO_ERROR)');
+                            debugWarn('AI Search Assistant: HTTP/2 stream closed during send (NO_ERROR)');
                             reject(new Error('Connection closed by server (HTTP/2 NO_ERROR). Please retry.'));
                             return;
                         }
@@ -537,7 +553,7 @@ class AiView extends St.BoxLayout {
 
     async _readJsonResponse(responseStream, botMessage) {
         const responseText = await this._readWholeStream(responseStream);
-        console.log(`AI Search Assistant: Received non-SSE response (${responseText.length} chars)`);
+        debugLog(`AI Search Assistant: Received non-SSE response (${responseText.length} chars)`);
 
         if (responseText.trim().startsWith('data:')) {
             const sseText = this._limitDisplayText(this._extractContentFromSseText(responseText));
@@ -564,7 +580,7 @@ class AiView extends St.BoxLayout {
             return String(direct).trim();
         } catch (e) {
             const fallback = String(responseText ?? '').trim();
-            console.error(`AI Search Assistant: Failed to parse JSON response: ${e.message}`);
+            debugError(`AI Search Assistant: Failed to parse JSON response: ${e.message}`);
             return fallback;
         }
     }
@@ -708,7 +724,7 @@ class AiView extends St.BoxLayout {
                     }
                     // Any other real error should still propagate.
                     resolve(null);
-                    console.warn(`AI Search Assistant: stream read ended with: ${msg}`);
+                    debugWarn(`AI Search Assistant: stream read ended with: ${msg}`);
                 }
             });
         });
@@ -947,7 +963,7 @@ class AiView extends St.BoxLayout {
         try {
             Gio.AppInfo.launch_default_for_uri(uri, null);
         } catch (e) {
-            console.error(`AI Search Assistant: Failed to open URI ${uri}`, e);
+            debugError(`AI Search Assistant: Failed to open URI ${uri}`, e);
         }
     }
 
@@ -1048,7 +1064,7 @@ class AiView extends St.BoxLayout {
         return this._conversationHistory.slice(this._conversationHistory.length - maxMessages);
     }
 
-    _refreshHistoryView() {
+    async _refreshHistoryView() {
         if (!this._historyBox)
             return;
 
@@ -1059,7 +1075,12 @@ class AiView extends St.BoxLayout {
             return;
         }
 
-        this._allMemoryEntries = this._loadMemoryEntries();
+        this._allMemoryEntries = await this._loadMemoryEntriesAsync();
+        if (!this._historyBox)
+            return;
+
+        this._clearChildren(this._historyBox);
+
         const sessions = this._buildHistorySessions(this._allMemoryEntries);
         if (sessions.length === 0) {
             this._renderHistoryEmptyState('No saved conversations yet.');
@@ -1251,13 +1272,13 @@ class AiView extends St.BoxLayout {
             child.destroy();
     }
 
-    _restoreConversationFromMemory() {
+    async _restoreConversationFromMemory() {
         if (!this._isPersistentMemoryEnabled()) {
             this._allMemoryEntries = [];
             return;
         }
 
-        this._allMemoryEntries = this._loadMemoryEntries();
+        this._allMemoryEntries = await this._loadMemoryEntriesAsync();
         if (this._allMemoryEntries.length === 0)
             return;
 
@@ -1313,7 +1334,7 @@ class AiView extends St.BoxLayout {
         try {
             GLib.mkdir_with_parents(dir, 0o700);
         } catch (e) {
-            console.warn(`AI Search Assistant: Failed to create memory dir ${dir}: ${e.message}`);
+            debugWarn(`AI Search Assistant: Failed to create memory dir ${dir}: ${e.message}`);
         }
     }
 
@@ -1321,34 +1342,22 @@ class AiView extends St.BoxLayout {
         this._ensureMemoryDir();
 
         const line = `${JSON.stringify(entry)}\n`;
-        let existing = '';
-        try {
-            const [ok, bytes] = GLib.file_get_contents(this._memoryFilePath);
-            if (ok)
-                existing = this._decodeBytes(bytes);
-        } catch (_e) {
-            existing = '';
-        }
-
-        try {
-            GLib.file_set_contents(this._memoryFilePath, `${existing}${line}`);
-        } catch (e) {
-            console.warn(`AI Search Assistant: Failed to append memory entry: ${e.message}`);
-        }
+        this._appendMemoryLineAsync(line).catch(e => {
+            debugWarn(`AI Search Assistant: Failed to append memory entry: ${e.message}`);
+        });
     }
 
-    _loadMemoryEntries() {
+    async _loadMemoryEntriesAsync() {
         this._ensureMemoryDir();
 
-        let content = '';
-        try {
-            const [ok, bytes] = GLib.file_get_contents(this._memoryFilePath);
-            if (ok)
-                content = this._decodeBytes(bytes);
-        } catch (_e) {
+        const content = await this._readMemoryTextAsync();
+        if (!content)
             return [];
-        }
 
+        return this._parseMemoryEntries(content);
+    }
+
+    _parseMemoryEntries(content) {
         const lines = String(content ?? '').split('\n');
         const entries = [];
         for (const line of lines) {
@@ -1375,6 +1384,79 @@ class AiView extends St.BoxLayout {
         }
 
         return entries;
+    }
+
+    _readMemoryTextAsync() {
+        const file = Gio.File.new_for_path(this._memoryFilePath);
+        return new Promise(resolve => {
+            file.read_async(GLib.PRIORITY_DEFAULT, null, (src, result) => {
+                let stream = null;
+                try {
+                    stream = src.read_finish(result);
+                } catch (_e) {
+                    resolve('');
+                    return;
+                }
+
+                this._readTextStreamAsync(stream)
+                    .then(text => {
+                        stream.close_async(GLib.PRIORITY_DEFAULT, null, null);
+                        resolve(text);
+                    })
+                    .catch(() => {
+                        stream.close_async(GLib.PRIORITY_DEFAULT, null, null);
+                        resolve('');
+                    });
+            });
+        });
+    }
+
+    async _readTextStreamAsync(stream) {
+        let text = '';
+        let truncated = false;
+
+        while (true) {
+            const bytes = await this._readBytesAsync(stream, 4096);
+            if (bytes === null || bytes.get_size() === 0)
+                break;
+
+            const limited = this._appendLimitedText(text, this._decodeBytes(bytes), MAX_DISPLAY_CHARS);
+            text = limited.text;
+            truncated = truncated || limited.truncated;
+        }
+
+        return this._formatLimitedText(text, truncated);
+    }
+
+    _appendMemoryLineAsync(line) {
+        const file = Gio.File.new_for_path(this._memoryFilePath);
+        const bytes = new GLib.Bytes(line);
+
+        return new Promise((resolve, reject) => {
+            file.append_to_async(Gio.FileCreateFlags.NONE, GLib.PRIORITY_DEFAULT, null, (src, result) => {
+                let stream = null;
+                try {
+                    stream = src.append_to_finish(result);
+                } catch (e) {
+                    reject(e);
+                    return;
+                }
+
+                stream.write_bytes_async(bytes, GLib.PRIORITY_DEFAULT, null, (_stream, writeResult) => {
+                    try {
+                        stream.write_bytes_finish(writeResult);
+                    } catch (e) {
+                        stream.close_async(GLib.PRIORITY_DEFAULT, null, null);
+                        reject(e);
+                        return;
+                    }
+
+                    stream.close_async(GLib.PRIORITY_DEFAULT, null, () => {
+                        resolve();
+                    });
+                });
+            });
+        });
     }
 
     _recallRelevantMemory(prompt, maxItems) {

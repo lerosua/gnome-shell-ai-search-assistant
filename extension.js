@@ -9,15 +9,32 @@ import { AiView } from './aiView.js';
 const AI_PLACEHOLDER_TEXT = 'Ask AI Assistant';
 const SEARCH_ICON_NAME = 'edit-find-symbolic';
 const AI_ICON_FILENAME = 'ai-search-symbolic.svg';
+const debug = false;
+
+function debugLog(...args) {
+    if (debug)
+        console.log(...args);
+}
+
+function debugWarn(...args) {
+    if (debug)
+        console.warn(...args);
+}
+
+function debugError(...args) {
+    if (debug)
+        console.error(...args);
+}
 
 export default class AiSearchAssistantExtension extends Extension {
     enable() {
-        console.log('AI Search Assistant: Enabling...');
+        debugLog('AI Search Assistant: Enabling...');
         
         this._isAiMode = false;
         this._isSubmitting = false;
         this._isUpdatingSearchText = false;
         this._previousSearchActive = null;
+        this._modeVisibilityIdleId = null;
         this._settings = this.getSettings();
         this._searchEntry = Main.overview.searchEntry;
         this._searchTextActor = this._searchEntry?.clutter_text ?? null;
@@ -82,11 +99,7 @@ export default class AiSearchAssistantExtension extends Extension {
                 if (this._isUpdatingSearchText)
                     return;
 
-                GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
-                    this._syncModeVisibility();
-                    this._scheduleVisibilityReassertion();
-                    return GLib.SOURCE_REMOVE;
-                });
+                this._queueModeVisibilitySync();
             });
 
             this._searchKeyPressSignal = this._searchTextActor.connect('key-press-event', (_actor, event) => {
@@ -108,19 +121,13 @@ export default class AiSearchAssistantExtension extends Extension {
             if (!this._isAiMode || !this._aiView)
                 return;
 
-            GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
-                if (this._isAiMode && this._aiView) {
-                    this._syncModeVisibility();
-                    this._scheduleVisibilityReassertion();
-                }
-                return GLib.SOURCE_REMOVE;
-            });
+            this._queueModeVisibilitySync();
         });
 
         this._overviewHiddenSignal = Main.overview.connect('hidden', () => {
             if (this._isAiMode) {
                 this._setAiMode(false);
-                console.log('AI Search Assistant: Overview hidden, switched to Search Mode');
+                debugLog('AI Search Assistant: Overview hidden, switched to Search Mode');
             } else {
                 this._cancelVisibilityReassertion();
             }
@@ -168,7 +175,7 @@ export default class AiSearchAssistantExtension extends Extension {
                     offset: 0,
                 }));
                 this._aiViewParent = srParent;
-                console.log('AI Search Assistant: AI view attached as sibling of search results');
+                debugLog('AI Search Assistant: AI view attached as sibling of search results');
             } else {
                 // Last-resort fallback for unusual shell internals.
                 const overviewGroup = Main.overview._overview ?? Main.layoutManager.overviewGroup;
@@ -180,9 +187,9 @@ export default class AiSearchAssistantExtension extends Extension {
                         offset: 0,
                     }));
                     this._aiViewParent = overviewGroup;
-                    console.warn('AI Search Assistant: Falling back to overview overlay attachment');
+                    debugWarn('AI Search Assistant: Falling back to overview overlay attachment');
                 } else {
-                    console.warn('AI Search Assistant: Could not find a suitable parent for AI view');
+                    debugWarn('AI Search Assistant: Could not find a suitable parent for AI view');
                 }
             }
 
@@ -190,7 +197,7 @@ export default class AiSearchAssistantExtension extends Extension {
             this._aiView.reactive = true;
             this._raiseAiView();
         } catch (e) {
-            console.error('AI Search Assistant: Error attaching AI view', e);
+            debugError('AI Search Assistant: Error attaching AI view', e);
         }
     }
 
@@ -213,7 +220,7 @@ export default class AiSearchAssistantExtension extends Extension {
                 this._icon.add_style_class_name('active');
             this._setEntryIcon(this._aiIcon);
             this._setSearchPlaceholder(AI_PLACEHOLDER_TEXT);
-            console.log('AI Search Assistant: Switched to AI Mode');
+            debugLog('AI Search Assistant: Switched to AI Mode');
         } else {
             if (this._aiButton)
                 this._aiButton.remove_style_pseudo_class('checked');
@@ -222,7 +229,7 @@ export default class AiSearchAssistantExtension extends Extension {
             this._setEntryIcon(null);
             this._setSearchPlaceholder(this._originalSearchPlaceholder);
             this._restoreOverviewSearchActive();
-            console.log('AI Search Assistant: Switched to Search Mode');
+            debugLog('AI Search Assistant: Switched to Search Mode');
         }
 
         this._syncModeVisibility();
@@ -253,7 +260,7 @@ export default class AiSearchAssistantExtension extends Extension {
         if (!this._setAiMode(false))
             return false;
 
-        console.log(`AI Search Assistant: ${reason}, switched to Search Mode`);
+        debugLog(`AI Search Assistant: ${reason}, switched to Search Mode`);
         return true;
     }
 
@@ -293,7 +300,7 @@ export default class AiSearchAssistantExtension extends Extension {
             return Clutter.EVENT_PROPAGATE;
 
         this._submitAiPrompt();
-        console.log('AI Search Assistant: Enter intercepted in AI mode');
+        debugLog('AI Search Assistant: Enter intercepted in AI mode');
         return Clutter.EVENT_STOP;
     }
 
@@ -309,7 +316,7 @@ export default class AiSearchAssistantExtension extends Extension {
         if (this._isAiMode && this._aiView)
             this._aiView.visible = true;
 
-        console.log(`AI Search Assistant: Submitting prompt (${prompt.length} chars)`);
+        debugLog(`AI Search Assistant: Submitting prompt (${prompt.length} chars)`);
 
         this._aiView.addMessage('You', prompt);
 
@@ -319,13 +326,7 @@ export default class AiSearchAssistantExtension extends Extension {
         // the search results container when the entry becomes empty.  Since
         // aiView lives inside that container we must re-assert visibility
         // after the search controller has finished processing the empty text.
-        GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
-            if (this._isAiMode && this._aiView) {
-                this._syncModeVisibility();
-                this._scheduleVisibilityReassertion();
-            }
-            return GLib.SOURCE_REMOVE;
-        });
+        this._queueModeVisibilitySync();
 
         try {
             await this._aiView.generateResponse(prompt);
@@ -366,7 +367,7 @@ export default class AiSearchAssistantExtension extends Extension {
             if (this._searchEntry?.hint_text !== undefined)
                 return this._searchEntry.hint_text;
         } catch (e) {
-            console.warn(`AI Search Assistant: Failed to read search placeholder: ${e.message}`);
+            debugWarn(`AI Search Assistant: Failed to read search placeholder: ${e.message}`);
         }
 
         return '';
@@ -383,7 +384,7 @@ export default class AiSearchAssistantExtension extends Extension {
             if (this._searchEntry?.hint_text !== undefined)
                 this._searchEntry.hint_text = text;
         } catch (e) {
-            console.warn(`AI Search Assistant: Failed to set search placeholder: ${e.message}`);
+            debugWarn(`AI Search Assistant: Failed to set search placeholder: ${e.message}`);
         }
     }
 
@@ -409,7 +410,7 @@ export default class AiSearchAssistantExtension extends Extension {
             if (controller._searchActive !== undefined)
                 return !!controller._searchActive;
         } catch (e) {
-            console.warn(`AI Search Assistant: Failed to read search active state: ${e.message}`);
+            debugWarn(`AI Search Assistant: Failed to read search active state: ${e.message}`);
         }
 
         return null;
@@ -432,7 +433,7 @@ export default class AiSearchAssistantExtension extends Extension {
                 return true;
             }
         } catch (e) {
-            console.warn(`AI Search Assistant: Failed to set search active state: ${e.message}`);
+            debugWarn(`AI Search Assistant: Failed to set search active state: ${e.message}`);
         }
 
         return false;
@@ -482,6 +483,20 @@ export default class AiSearchAssistantExtension extends Extension {
         }
     }
 
+    _queueModeVisibilitySync() {
+        if (this._modeVisibilityIdleId)
+            return;
+
+        this._modeVisibilityIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            this._modeVisibilityIdleId = null;
+            if (this._isAiMode && this._aiView) {
+                this._syncModeVisibility();
+                this._scheduleVisibilityReassertion();
+            }
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
     _isOverviewTargetVisible() {
         if (Main.overview?.visibleTarget !== undefined)
             return !!Main.overview.visibleTarget;
@@ -515,7 +530,7 @@ export default class AiSearchAssistantExtension extends Extension {
             if (typeof this._aiView.raise_top === 'function')
                 this._aiView.raise_top();
         } catch (e) {
-            console.warn(`AI Search Assistant: Failed to raise AI view: ${e.message}`);
+            debugWarn(`AI Search Assistant: Failed to raise AI view: ${e.message}`);
         }
     }
 
@@ -568,8 +583,16 @@ export default class AiSearchAssistantExtension extends Extension {
         this._visibilityReassertionId = null;
     }
 
+    _cancelModeVisibilitySync() {
+        if (!this._modeVisibilityIdleId)
+            return;
+
+        GLib.source_remove(this._modeVisibilityIdleId);
+        this._modeVisibilityIdleId = null;
+    }
+
     disable() {
-        console.log('AI Search Assistant: Disabling...');
+        debugLog('AI Search Assistant: Disabling...');
 
         if (this._isAiMode)
             this._restoreOverviewSearchActive();
@@ -606,6 +629,7 @@ export default class AiSearchAssistantExtension extends Extension {
         }
 
         this._cancelVisibilityReassertion();
+        this._cancelModeVisibilitySync();
 
         if (this._iconButtonSignal && this._searchEntry) {
             this._searchEntry.disconnect(this._iconButtonSignal);
@@ -623,6 +647,11 @@ export default class AiSearchAssistantExtension extends Extension {
             }
             this._aiButton.destroy();
             this._aiButton = null;
+        }
+
+        if (this._icon) {
+            this._icon.destroy();
+            this._icon = null;
         }
 
         if (this._aiView) {
@@ -651,7 +680,7 @@ export default class AiSearchAssistantExtension extends Extension {
         this._isSubmitting = false;
         this._isUpdatingSearchText = false;
         this._previousSearchActive = null;
+        this._modeVisibilityIdleId = null;
         this._usesPrimaryIcon = false;
-        this._icon = null;
     }
 }

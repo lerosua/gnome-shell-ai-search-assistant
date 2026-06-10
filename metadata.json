@@ -11,5 +11,5 @@
     ],
     "settings-schema": "org.gnome.shell.extensions.ai-search-assistant",
     "url": "https://github.com/lerosua/gnome-shell-ai-search-assistant",
-    "version": 1
+    "version": 2
 }

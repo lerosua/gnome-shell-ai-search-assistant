@@ -34,7 +34,7 @@ function createExtension(searchActive = false, searchText = '') {
         _searchController: controller,
         _aiButton: null,
         _usesPrimaryIcon: false,
-        _icon: {},
+        _icon: {destroy() {}},
         _aiIcon: {},
         _originalSearchPlaceholder: 'Search',
         _aiView: {visible: false, reactive: false, destroy() {}},
