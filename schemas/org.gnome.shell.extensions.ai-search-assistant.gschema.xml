@@ -26,5 +26,10 @@
       <summary>Enable persistent chat memory</summary>
       <description>When enabled, user prompts and model replies are stored on disk and reloaded in later sessions.</description>
     </key>
+    <key name="toggle-ai-mode" type="as">
+      <default>["&lt;Super&gt;x"]</default>
+      <summary>Toggle AI mode shortcut</summary>
+      <description>Global keyboard shortcut used to open the overview and toggle AI mode.</description>
+    </key>
   </schema>
 </schemalist>

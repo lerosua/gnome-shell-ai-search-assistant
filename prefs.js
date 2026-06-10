@@ -1,4 +1,5 @@
 import Adw from 'gi://Adw';
+import Gdk from 'gi://Gdk';
 import Gtk from 'gi://Gtk';
 import GLib from 'gi://GLib';
 import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
@@ -6,6 +7,9 @@ import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/
 const MEMORY_DIRNAME = 'ai-search-assistant';
 const MEMORY_FILENAME = 'chat-history.jsonl';
 const PROVIDER_ENTRY_WIDTH_CHARS = 32;
+const TOGGLE_AI_MODE_KEYBINDING = 'toggle-ai-mode';
+const SHORTCUT_RECORDING_LABEL = 'Press shortcut...';
+const SHORTCUT_DISABLED_LABEL = 'Disabled';
 
 export default class AiSearchAssistantPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
@@ -48,6 +52,14 @@ export default class AiSearchAssistantPreferences extends ExtensionPreferences {
         });
 
         this._addTemperatureRow(group, settings);
+
+        const shortcutGroup = new Adw.PreferencesGroup({
+            title: 'Keyboard Shortcut',
+            description: 'Configure the global shortcut used to toggle AI mode.'
+        });
+        page.add(shortcutGroup);
+
+        this._addShortcutRow(shortcutGroup, settings);
 
         const privacyGroup = new Adw.PreferencesGroup({
             title: 'Privacy',
@@ -113,6 +125,100 @@ export default class AiSearchAssistantPreferences extends ExtensionPreferences {
         row.add_suffix(spin);
         row.activatable_widget = spin;
         group.add(row);
+    }
+
+    _addShortcutRow(group, settings) {
+        const row = new Adw.ActionRow({
+            title: 'Toggle AI Mode',
+            subtitle: 'Click the button, then press a shortcut. Backspace clears it.'
+        });
+
+        const button = new Gtk.Button({
+            valign: Gtk.Align.CENTER
+        });
+
+        let recording = false;
+        const updateButton = () => {
+            button.set_label(recording
+                ? SHORTCUT_RECORDING_LABEL
+                : this._getShortcutLabel(settings));
+        };
+
+        button.connect('clicked', () => {
+            recording = true;
+            updateButton();
+            button.grab_focus();
+        });
+
+        const controller = new Gtk.EventControllerKey();
+        controller.connect('key-pressed', (_controller, keyval, _keycode, state) => {
+            if (!recording)
+                return false;
+
+            if (keyval === Gdk.KEY_Escape) {
+                recording = false;
+                updateButton();
+                return true;
+            }
+
+            if (keyval === Gdk.KEY_BackSpace) {
+                settings.set_strv(TOGGLE_AI_MODE_KEYBINDING, []);
+                recording = false;
+                updateButton();
+                return true;
+            }
+
+            const modifiers = state & Gtk.accelerator_get_default_mod_mask();
+            if (!this._isValidShortcut(keyval, modifiers))
+                return true;
+
+            settings.set_strv(TOGGLE_AI_MODE_KEYBINDING, [
+                Gtk.accelerator_name(keyval, modifiers)
+            ]);
+            recording = false;
+            updateButton();
+            return true;
+        });
+        button.add_controller(controller);
+
+        settings.connect(`changed::${TOGGLE_AI_MODE_KEYBINDING}`, () => {
+            if (!recording)
+                updateButton();
+        });
+        updateButton();
+
+        row.add_suffix(button);
+        row.activatable_widget = button;
+        group.add(row);
+    }
+
+    _getShortcutLabel(settings) {
+        const shortcuts = settings.get_strv(TOGGLE_AI_MODE_KEYBINDING);
+        const shortcut = shortcuts[0] ?? '';
+        if (!shortcut)
+            return SHORTCUT_DISABLED_LABEL;
+
+        const [ok, keyval, modifiers] = Gtk.accelerator_parse(shortcut);
+        if (!ok || !Gtk.accelerator_valid(keyval, modifiers))
+            return shortcut;
+
+        return Gtk.accelerator_get_label(keyval, modifiers);
+    }
+
+    _isValidShortcut(keyval, modifiers) {
+        if (!Gtk.accelerator_valid(keyval, modifiers))
+            return false;
+
+        const nonShiftModifiers =
+            Gdk.ModifierType.CONTROL_MASK |
+            Gdk.ModifierType.ALT_MASK |
+            Gdk.ModifierType.SUPER_MASK |
+            Gdk.ModifierType.META_MASK;
+
+        if ((modifiers & nonShiftModifiers) !== 0)
+            return true;
+
+        return keyval >= Gdk.KEY_F1 && keyval <= Gdk.KEY_F35;
     }
 
     _addMemoryToggleRow(group, settings) {

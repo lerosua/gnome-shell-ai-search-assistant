@@ -2,6 +2,8 @@ import St from 'gi://St';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
+import Meta from 'gi://Meta';
+import Shell from 'gi://Shell';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import { AiView } from './aiView.js';
@@ -9,6 +11,7 @@ import { AiView } from './aiView.js';
 const AI_PLACEHOLDER_TEXT = 'Ask AI Assistant';
 const SEARCH_ICON_NAME = 'edit-find-symbolic';
 const AI_ICON_FILENAME = 'ai-search-symbolic.svg';
+const TOGGLE_AI_MODE_KEYBINDING = 'toggle-ai-mode';
 const debug = false;
 
 function debugLog(...args) {
@@ -36,6 +39,8 @@ export default class AiSearchAssistantExtension extends Extension {
         this._hasAiInteraction = false;
         this._previousSearchActive = null;
         this._modeVisibilityIdleId = null;
+        this._focusSearchIdleId = null;
+        this._toggleShortcutRegistered = false;
         this._settings = this.getSettings();
         this._searchEntry = Main.overview.searchEntry;
         this._searchTextActor = this._searchEntry?.clutter_text ?? null;
@@ -118,11 +123,18 @@ export default class AiSearchAssistantExtension extends Extension {
             });
         }
 
+        this._shortcutChangedSignal = this._settings.connect(
+            `changed::${TOGGLE_AI_MODE_KEYBINDING}`,
+            () => this._reloadToggleShortcut()
+        );
+        this._registerToggleShortcut();
+
         this._overviewShowingSignal = Main.overview.connect('showing', () => {
             if (!this._isAiMode || !this._aiView)
                 return;
 
             this._queueModeVisibilitySync();
+            this._queueFocusSearchEntry();
         });
 
         this._overviewHiddenSignal = Main.overview.connect('hidden', () => {
@@ -204,6 +216,18 @@ export default class AiSearchAssistantExtension extends Extension {
 
     _toggleMode() {
         this._setAiMode(!this._isAiMode);
+    }
+
+    _toggleModeFromShortcut() {
+        if (!this._isOverviewTargetVisible()) {
+            Main.overview.show();
+            this._setAiMode(true);
+            this._queueFocusSearchEntry();
+            return;
+        }
+
+        this._toggleMode();
+        this._queueFocusSearchEntry();
     }
 
     _setAiMode(isAiMode) {
@@ -524,6 +548,26 @@ export default class AiSearchAssistantExtension extends Extension {
         });
     }
 
+    _queueFocusSearchEntry() {
+        if (this._focusSearchIdleId)
+            return;
+
+        this._focusSearchIdleId = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+            this._focusSearchIdleId = null;
+            this._focusSearchEntry();
+            return GLib.SOURCE_REMOVE;
+        });
+    }
+
+    _focusSearchEntry() {
+        if (this._searchTextActor?.grab_key_focus) {
+            this._searchTextActor.grab_key_focus();
+            return;
+        }
+
+        this._searchEntry?.grab_key_focus?.();
+    }
+
     _isOverviewTargetVisible() {
         if (Main.overview?.visibleTarget !== undefined)
             return !!Main.overview.visibleTarget;
@@ -618,6 +662,51 @@ export default class AiSearchAssistantExtension extends Extension {
         this._modeVisibilityIdleId = null;
     }
 
+    _cancelFocusSearch() {
+        if (!this._focusSearchIdleId)
+            return;
+
+        GLib.source_remove(this._focusSearchIdleId);
+        this._focusSearchIdleId = null;
+    }
+
+    _registerToggleShortcut() {
+        this._removeToggleShortcut();
+
+        const shortcuts = this._settings?.get_strv?.(TOGGLE_AI_MODE_KEYBINDING) ?? [];
+        if (shortcuts.length === 0 || !shortcuts[0])
+            return;
+
+        try {
+            Main.wm.addKeybinding(
+                TOGGLE_AI_MODE_KEYBINDING,
+                this._settings,
+                Meta.KeyBindingFlags.NONE,
+                Shell.ActionMode.NORMAL | Shell.ActionMode.OVERVIEW,
+                () => this._toggleModeFromShortcut()
+            );
+            this._toggleShortcutRegistered = true;
+        } catch (e) {
+            debugWarn(`AI Search Assistant: Failed to register toggle shortcut: ${e.message}`);
+        }
+    }
+
+    _removeToggleShortcut() {
+        if (!this._toggleShortcutRegistered)
+            return;
+
+        try {
+            Main.wm.removeKeybinding(TOGGLE_AI_MODE_KEYBINDING);
+        } catch (e) {
+            debugWarn(`AI Search Assistant: Failed to remove toggle shortcut: ${e.message}`);
+        }
+        this._toggleShortcutRegistered = false;
+    }
+
+    _reloadToggleShortcut() {
+        this._registerToggleShortcut();
+    }
+
     disable() {
         debugLog('AI Search Assistant: Disabling...');
 
@@ -657,6 +746,13 @@ export default class AiSearchAssistantExtension extends Extension {
 
         this._cancelVisibilityReassertion();
         this._cancelModeVisibilitySync();
+        this._cancelFocusSearch();
+        this._removeToggleShortcut();
+
+        if (this._shortcutChangedSignal && this._settings) {
+            this._settings.disconnect(this._shortcutChangedSignal);
+            this._shortcutChangedSignal = null;
+        }
 
         if (this._iconButtonSignal && this._searchEntry) {
             this._searchEntry.disconnect(this._iconButtonSignal);
@@ -709,6 +805,9 @@ export default class AiSearchAssistantExtension extends Extension {
         this._hasAiInteraction = false;
         this._previousSearchActive = null;
         this._modeVisibilityIdleId = null;
+        this._focusSearchIdleId = null;
+        this._shortcutChangedSignal = null;
+        this._toggleShortcutRegistered = false;
         this._usesPrimaryIcon = false;
     }
 }
