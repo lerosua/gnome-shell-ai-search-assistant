@@ -1,6 +1,6 @@
 {
     "name": "GNOME Shell AI Search Assistant",
-    "description": "Adds an AI chat mode to the GNOME Shell overview search.",
+    "description": "Adds an AI chat mode to the GNOME Shell overview search. User prompts are sent to the configured OpenAI-compatible API provider, and optional memory stores chat history locally.",
     "uuid": "ai-search-assistant@lerosua",
     "shell-version": [
         "45",
