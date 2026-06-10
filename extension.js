@@ -33,6 +33,7 @@ export default class AiSearchAssistantExtension extends Extension {
         this._isAiMode = false;
         this._isSubmitting = false;
         this._isUpdatingSearchText = false;
+        this._hasAiInteraction = false;
         this._previousSearchActive = null;
         this._modeVisibilityIdleId = null;
         this._settings = this.getSettings();
@@ -213,7 +214,6 @@ export default class AiSearchAssistantExtension extends Extension {
 
         if (this._isAiMode) {
             this._captureSearchActiveBeforeAiMode();
-            this._setOverviewSearchActive(true);
             if (this._aiButton)
                 this._aiButton.add_style_pseudo_class('checked');
             if (this._usesPrimaryIcon)
@@ -312,6 +312,7 @@ export default class AiSearchAssistantExtension extends Extension {
             return;
 
         this._isSubmitting = true;
+        this._hasAiInteraction = true;
 
         if (this._isAiMode && this._aiView)
             this._aiView.visible = true;
@@ -449,6 +450,25 @@ export default class AiSearchAssistantExtension extends Extension {
         this._previousSearchActive = null;
     }
 
+    _shouldShowAiView() {
+        if (!this._isAiMode)
+            return false;
+
+        if (this._isSubmitting || this._hasAiInteraction)
+            return true;
+
+        return this._extractPromptFromInput(this._getSearchEntryText()).length > 0;
+    }
+
+    _restoreSearchActorVisibility(searchActor) {
+        if (!searchActor)
+            return;
+
+        searchActor.visible = true;
+        searchActor.opacity = 255;
+        searchActor.reactive = true;
+    }
+
     _syncModeVisibility() {
         const searchActor = this._searchResultsActor ?? null;
 
@@ -458,9 +478,19 @@ export default class AiSearchAssistantExtension extends Extension {
         if (this._isAiMode) {
             if (!this._isOverviewTargetVisible()) {
                 this._aiView.visible = false;
+                this._aiView.reactive = false;
+                this._restoreSearchActorVisibility(searchActor);
                 return;
             }
 
+            if (!this._shouldShowAiView()) {
+                this._aiView.visible = false;
+                this._aiView.reactive = false;
+                this._restoreSearchActorVisibility(searchActor);
+                return;
+            }
+
+            this._setOverviewSearchActive(true);
             this._aiView.visible = true;
             this._aiView.reactive = true;
             this._raiseAiView();
@@ -476,11 +506,8 @@ export default class AiSearchAssistantExtension extends Extension {
         }
 
         this._aiView.visible = false;
-        if (searchActor) {
-            searchActor.visible = true;
-            searchActor.opacity = 255;
-            searchActor.reactive = true;
-        }
+        this._aiView.reactive = false;
+        this._restoreSearchActorVisibility(searchActor);
     }
 
     _queueModeVisibilitySync() {
@@ -679,6 +706,7 @@ export default class AiSearchAssistantExtension extends Extension {
         this._isAiMode = false;
         this._isSubmitting = false;
         this._isUpdatingSearchText = false;
+        this._hasAiInteraction = false;
         this._previousSearchActive = null;
         this._modeVisibilityIdleId = null;
         this._usesPrimaryIcon = false;

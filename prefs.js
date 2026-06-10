@@ -5,6 +5,7 @@ import { ExtensionPreferences } from 'resource:///org/gnome/Shell/Extensions/js/
 
 const MEMORY_DIRNAME = 'ai-search-assistant';
 const MEMORY_FILENAME = 'chat-history.jsonl';
+const PROVIDER_ENTRY_WIDTH_CHARS = 32;
 
 export default class AiSearchAssistantPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
@@ -65,7 +66,10 @@ export default class AiSearchAssistantPreferences extends ExtensionPreferences {
         });
 
         const entry = new Gtk.Entry({
-            hexpand: true,
+            width_chars: PROVIDER_ENTRY_WIDTH_CHARS,
+            max_width_chars: PROVIDER_ENTRY_WIDTH_CHARS,
+            halign: Gtk.Align.END,
+            valign: Gtk.Align.CENTER,
             placeholder_text: placeholder
         });
 
