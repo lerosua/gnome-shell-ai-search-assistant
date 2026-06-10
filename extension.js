@@ -17,6 +17,7 @@ export default class AiSearchAssistantExtension extends Extension {
         this._isAiMode = false;
         this._isSubmitting = false;
         this._isUpdatingSearchText = false;
+        this._previousSearchActive = null;
         this._settings = this.getSettings();
         this._searchEntry = Main.overview.searchEntry;
         this._searchTextActor = this._searchEntry?.clutter_text ?? null;
@@ -144,10 +145,11 @@ export default class AiSearchAssistantExtension extends Extension {
 
             this._searchResultsView = null;
             this._searchResultsActor = null;
+            this._searchController = overviewControls?._searchController ?? null;
             this._aiViewParent = null;
 
-            if (overviewControls?._searchController) {
-                const sr = overviewControls._searchController._searchResults;
+            if (this._searchController) {
+                const sr = this._searchController._searchResults;
                 this._searchResultsView = sr;
                 this._searchResultsActor = sr?.actor ?? sr;
             }
@@ -203,6 +205,8 @@ export default class AiSearchAssistantExtension extends Extension {
         this._isAiMode = isAiMode;
 
         if (this._isAiMode) {
+            this._captureSearchActiveBeforeAiMode();
+            this._setOverviewSearchActive(true);
             if (this._aiButton)
                 this._aiButton.add_style_pseudo_class('checked');
             if (this._usesPrimaryIcon)
@@ -217,6 +221,7 @@ export default class AiSearchAssistantExtension extends Extension {
                 this._icon.remove_style_class_name('active');
             this._setEntryIcon(null);
             this._setSearchPlaceholder(this._originalSearchPlaceholder);
+            this._restoreOverviewSearchActive();
             console.log('AI Search Assistant: Switched to Search Mode');
         }
 
@@ -386,6 +391,63 @@ export default class AiSearchAssistantExtension extends Extension {
         return String(text ?? '').trim();
     }
 
+    _captureSearchActiveBeforeAiMode() {
+        if (this._previousSearchActive !== null)
+            return;
+
+        this._previousSearchActive = this._getOverviewSearchActive();
+    }
+
+    _getOverviewSearchActive() {
+        const controller = this._searchController ?? null;
+        if (!controller)
+            return null;
+
+        try {
+            if (controller.searchActive !== undefined)
+                return !!controller.searchActive;
+            if (controller._searchActive !== undefined)
+                return !!controller._searchActive;
+        } catch (e) {
+            console.warn(`AI Search Assistant: Failed to read search active state: ${e.message}`);
+        }
+
+        return null;
+    }
+
+    _setOverviewSearchActive(active) {
+        const controller = this._searchController ?? null;
+        if (!controller)
+            return false;
+
+        try {
+            if (controller.searchActive !== undefined) {
+                controller.searchActive = !!active;
+                return true;
+            }
+
+            if (controller._searchActive !== undefined) {
+                controller._searchActive = !!active;
+                controller.notify?.('search-active');
+                return true;
+            }
+        } catch (e) {
+            console.warn(`AI Search Assistant: Failed to set search active state: ${e.message}`);
+        }
+
+        return false;
+    }
+
+    _restoreOverviewSearchActive() {
+        const hasSearchText = this._getSearchEntryText().trim().length > 0;
+        const nextSearchActive = hasSearchText
+            ? true
+            : (this._previousSearchActive ?? false);
+
+        this._setOverviewSearchActive(nextSearchActive);
+        this._previousSearchActive = null;
+    }
+
     _syncModeVisibility() {
         const searchActor = this._searchResultsActor ?? null;
 
@@ -509,6 +571,9 @@ export default class AiSearchAssistantExtension extends Extension {
     disable() {
         console.log('AI Search Assistant: Disabling...');
 
+        if (this._isAiMode)
+            this._restoreOverviewSearchActive();
+
         if (this._stageSignal) {
             if (global.stage)
                 global.stage.disconnect(this._stageSignal);
@@ -578,12 +643,14 @@ export default class AiSearchAssistantExtension extends Extension {
         this._searchTextActor = null;
         this._searchResultsView = null;
         this._searchResultsActor = null;
+        this._searchController = null;
         this._aiViewParent = null;
         this._settings = null;
         this._originalSearchPlaceholder = null;
         this._isAiMode = false;
         this._isSubmitting = false;
         this._isUpdatingSearchText = false;
+        this._previousSearchActive = null;
         this._usesPrimaryIcon = false;
         this._icon = null;
     }
