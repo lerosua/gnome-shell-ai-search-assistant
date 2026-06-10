@@ -68,11 +68,14 @@ class AiView extends St.BoxLayout {
         this._currentSessionId = `${Date.now()}`;
         this._sessionGeneration = 0;
         this._thinkingAnimationId = null;
+        this._scrollToBottomId = null;
         this._activeTab = 'chat';
         this._selectedHistorySessionId = null;
 
         this.connect('destroy', () => {
             this._stopThinkingAnimation();
+            this._cancelScrollToBottom();
+            this._session.abort();
         });
 
         this._textDecoder = null;
@@ -945,7 +948,9 @@ class AiView extends St.BoxLayout {
     }
 
     _scrollToBottom() {
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+        this._cancelScrollToBottom();
+        this._scrollToBottomId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 50, () => {
+            this._scrollToBottomId = null;
             const adjustment = this._scrollView.vadjustment ?? this._scrollView.vscroll?.adjustment;
             if (adjustment) {
                 const upper = adjustment.upper ?? adjustment.get_upper?.() ?? 0;
@@ -954,6 +959,14 @@ class AiView extends St.BoxLayout {
             }
             return GLib.SOURCE_REMOVE;
         });
+    }
+
+    _cancelScrollToBottom() {
+        if (!this._scrollToBottomId)
+            return;
+
+        GLib.source_remove(this._scrollToBottomId);
+        this._scrollToBottomId = null;
     }
 
     _openUri(uri) {
