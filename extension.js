@@ -1,11 +1,14 @@
 import St from 'gi://St';
 import Clutter from 'gi://Clutter';
 import GLib from 'gi://GLib';
+import Gio from 'gi://Gio';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import { AiView } from './aiView.js';
 
 const AI_ENTRY_PREFIX = '_';
+const SEARCH_ICON_NAME = 'edit-find-symbolic';
+const AI_ICON_FILENAME = 'ai-search-symbolic.svg';
 
 export default class AiSearchAssistantExtension extends Extension {
     enable() {
@@ -18,10 +21,11 @@ export default class AiSearchAssistantExtension extends Extension {
         this._searchEntry = Main.overview.searchEntry;
         this._searchTextActor = this._searchEntry?.clutter_text ?? null;
         this._usesPrimaryIcon = false;
+        this._aiIcon = this._loadAiIcon();
 
         // Create the Icon
         this._icon = new St.Icon({
-            icon_name: 'edit-find-symbolic',
+            icon_name: SEARCH_ICON_NAME,
             style_class: 'search-entry-icon ai-search-entry-icon'
         });
 
@@ -206,7 +210,7 @@ export default class AiSearchAssistantExtension extends Extension {
                 this._aiButton.add_style_pseudo_class('checked');
             if (this._usesPrimaryIcon)
                 this._icon.add_style_class_name('active');
-            this._icon.icon_name = 'chat-message-new-symbolic';
+            this._setEntryIcon(this._aiIcon);
             this._ensureAiPrefix();
             console.log('AI Search Assistant: Switched to AI Mode');
         } else {
@@ -214,7 +218,7 @@ export default class AiSearchAssistantExtension extends Extension {
                 this._aiButton.remove_style_pseudo_class('checked');
             if (this._usesPrimaryIcon)
                 this._icon.remove_style_class_name('active');
-            this._icon.icon_name = 'edit-find-symbolic';
+            this._setEntryIcon(null);
             this._clearAiPrefixIfPresent();
             console.log('AI Search Assistant: Switched to Search Mode');
         }
@@ -226,6 +230,21 @@ export default class AiSearchAssistantExtension extends Extension {
             this._cancelVisibilityReassertion();
 
         return true;
+    }
+
+    _loadAiIcon() {
+        const iconPath = GLib.build_filenamev([this.path, AI_ICON_FILENAME]);
+        return new Gio.FileIcon({file: Gio.File.new_for_path(iconPath)});
+    }
+
+    _setEntryIcon(gicon) {
+        if (gicon) {
+            this._icon.gicon = gicon;
+            return;
+        }
+
+        this._icon.gicon = null;
+        this._icon.icon_name = SEARCH_ICON_NAME;
     }
 
     _exitAiMode(reason) {
