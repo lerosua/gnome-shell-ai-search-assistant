@@ -6,7 +6,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import { AiView } from './aiView.js';
 
-const AI_ENTRY_PREFIX = '_';
+const AI_PLACEHOLDER_TEXT = 'Ask AI Assistant';
 const SEARCH_ICON_NAME = 'edit-find-symbolic';
 const AI_ICON_FILENAME = 'ai-search-symbolic.svg';
 
@@ -20,6 +20,7 @@ export default class AiSearchAssistantExtension extends Extension {
         this._settings = this.getSettings();
         this._searchEntry = Main.overview.searchEntry;
         this._searchTextActor = this._searchEntry?.clutter_text ?? null;
+        this._originalSearchPlaceholder = this._getSearchPlaceholder();
         this._usesPrimaryIcon = false;
         this._aiIcon = this._loadAiIcon();
 
@@ -79,10 +80,6 @@ export default class AiSearchAssistantExtension extends Extension {
 
                 if (this._isUpdatingSearchText)
                     return;
-
-                const rawText = this._getSearchEntryText();
-                if (rawText.trim().length === 0)
-                    this._ensureAiPrefix();
 
                 GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
                     this._syncModeVisibility();
@@ -211,7 +208,7 @@ export default class AiSearchAssistantExtension extends Extension {
             if (this._usesPrimaryIcon)
                 this._icon.add_style_class_name('active');
             this._setEntryIcon(this._aiIcon);
-            this._ensureAiPrefix();
+            this._setSearchPlaceholder(AI_PLACEHOLDER_TEXT);
             console.log('AI Search Assistant: Switched to AI Mode');
         } else {
             if (this._aiButton)
@@ -219,7 +216,7 @@ export default class AiSearchAssistantExtension extends Extension {
             if (this._usesPrimaryIcon)
                 this._icon.remove_style_class_name('active');
             this._setEntryIcon(null);
-            this._clearAiPrefixIfPresent();
+            this._setSearchPlaceholder(this._originalSearchPlaceholder);
             console.log('AI Search Assistant: Switched to Search Mode');
         }
 
@@ -312,7 +309,6 @@ export default class AiSearchAssistantExtension extends Extension {
         this._aiView.addMessage('You', prompt);
 
         this._setSearchEntryText('');
-        this._ensureAiPrefix();
 
         // GNOME Shell's search controller reacts to text changes and hides
         // the search results container when the entry becomes empty.  Since
@@ -358,31 +354,36 @@ export default class AiSearchAssistantExtension extends Extension {
         }
     }
 
+    _getSearchPlaceholder() {
+        try {
+            if (this._searchEntry?.get_hint_text)
+                return this._searchEntry.get_hint_text();
+            if (this._searchEntry?.hint_text !== undefined)
+                return this._searchEntry.hint_text;
+        } catch (e) {
+            console.warn(`AI Search Assistant: Failed to read search placeholder: ${e.message}`);
+        }
+
+        return '';
+    }
+
+    _setSearchPlaceholder(value) {
+        try {
+            const text = String(value ?? '');
+            if (this._searchEntry?.set_hint_text) {
+                this._searchEntry.set_hint_text(text);
+                return;
+            }
+
+            if (this._searchEntry?.hint_text !== undefined)
+                this._searchEntry.hint_text = text;
+        } catch (e) {
+            console.warn(`AI Search Assistant: Failed to set search placeholder: ${e.message}`);
+        }
+    }
+
     _extractPromptFromInput(text) {
-        const input = String(text ?? '').trim();
-        if (input.length === 0)
-            return '';
-
-        return input.replace(/^_+\s*/, '').trim();
-    }
-
-    _ensureAiPrefix() {
-        if (!this._isAiMode)
-            return;
-
-        const current = this._getSearchEntryText();
-        if (current.trim().length > 0)
-            return;
-
-        this._setSearchEntryText(AI_ENTRY_PREFIX);
-    }
-
-    _clearAiPrefixIfPresent() {
-        const current = this._getSearchEntryText();
-        if (!/^_+\s*$/.test(current.trim()))
-            return;
-
-        this._setSearchEntryText('');
+        return String(text ?? '').trim();
     }
 
     _syncModeVisibility() {
@@ -564,7 +565,7 @@ export default class AiSearchAssistantExtension extends Extension {
             this._aiView = null;
         }
 
-        this._clearAiPrefixIfPresent();
+        this._setSearchPlaceholder(this._originalSearchPlaceholder);
         
         // Restore search results visibility just in case
         if (this._searchResultsActor) {
@@ -579,6 +580,7 @@ export default class AiSearchAssistantExtension extends Extension {
         this._searchResultsActor = null;
         this._aiViewParent = null;
         this._settings = null;
+        this._originalSearchPlaceholder = null;
         this._isAiMode = false;
         this._isSubmitting = false;
         this._isUpdatingSearchText = false;
