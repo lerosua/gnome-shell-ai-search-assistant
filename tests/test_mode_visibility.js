@@ -22,14 +22,17 @@ const context = {
 vm.createContext(context);
 vm.runInContext(source, context, {filename: sourcePath});
 
-function createExtension(searchActive = false, searchText = '') {
+function createExtension(searchActive = false, searchText = '', options = {}) {
     const extension = new context.AiSearchAssistantExtension();
     const controller = {searchActive};
     let setSearchEntryTextCalls = 0;
+    let currentSearchText = searchText;
+    const throwOnSetSearchText = options.throwOnSetSearchText ?? true;
 
     Object.assign(extension, {
         _isAiMode: false,
         _isSubmitting: false,
+        _hasAiInputSentinel: false,
         _previousSearchActive: null,
         _searchController: controller,
         _aiButton: null,
@@ -44,17 +47,23 @@ function createExtension(searchActive = false, searchText = '') {
         _scheduleVisibilityReassertion() {},
         _cancelVisibilityReassertion() {},
         _getSearchEntryText() {
-            return searchText;
+            return currentSearchText;
         },
-        _setSearchEntryText() {
+        _setSearchEntryText(value) {
             setSearchEntryTextCalls++;
-            throw new Error('AI mode toggle must not mutate the search entry text');
+            if (throwOnSetSearchText)
+                throw new Error('AI mode toggle must not mutate the search entry text');
+
+            currentSearchText = String(value ?? '');
         },
     });
 
     return {
         extension,
         controller,
+        get searchText() {
+            return currentSearchText;
+        },
         get setSearchEntryTextCalls() {
             return setSearchEntryTextCalls;
         },
@@ -130,6 +139,28 @@ function createVisibilityExtension(searchText = '', hasAiInteraction = false) {
 }
 
 {
+    const harness = createExtension(false, '_', {throwOnSetSearchText: false});
+    harness.extension._isAiMode = true;
+    harness.extension._hasAiInputSentinel = true;
+    harness.extension._previousSearchActive = false;
+    harness.extension._setAiMode(false);
+
+    assert.equal(harness.searchText, '');
+    assert.equal(harness.controller.searchActive, false);
+}
+
+{
+    const harness = createExtension(false, '_next question', {throwOnSetSearchText: false});
+    harness.extension._isAiMode = true;
+    harness.extension._hasAiInputSentinel = true;
+    harness.extension._previousSearchActive = false;
+    harness.extension._setAiMode(false);
+
+    assert.equal(harness.searchText, 'next question');
+    assert.equal(harness.controller.searchActive, true);
+}
+
+{
     const harness = createVisibilityExtension('');
     harness.extension._syncModeVisibility();
 
@@ -160,4 +191,65 @@ function createVisibilityExtension(searchText = '', hasAiInteraction = false) {
     assert.equal(harness.searchActor.reactive, false);
 }
 
-console.log('[PASS] AI mode toggles overview search state without mutating search text');
+{
+    const harness = createExtension(false, '_next question');
+    harness.extension._isAiMode = true;
+
+    assert.equal(harness.extension._extractPromptFromInput('_native query'), '_native query');
+
+    harness.extension._hasAiInputSentinel = true;
+    assert.equal(harness.extension._extractPromptFromInput('_'), '');
+    assert.equal(harness.extension._extractPromptFromInput('_next question'), 'next question');
+    assert.equal(harness.extension._extractPromptFromInput('__literal'), '_literal');
+
+    harness.extension._isAiMode = false;
+    assert.equal(harness.extension._extractPromptFromInput('_native query'), '_native query');
+}
+
+(async () => {
+    let searchText = 'ask ai';
+    let queuedVisibilitySync = false;
+    const messages = [];
+    const responses = [];
+    const extension = new context.AiSearchAssistantExtension();
+
+    Object.assign(extension, {
+        _isAiMode: true,
+        _isSubmitting: false,
+        _hasAiInteraction: false,
+        _hasAiInputSentinel: false,
+        _aiView: {
+            visible: false,
+            addMessage(sender, text) {
+                messages.push([sender, text]);
+            },
+            async generateResponse(prompt) {
+                responses.push(prompt);
+            },
+        },
+        _getSearchEntryText() {
+            return searchText;
+        },
+        _setSearchEntryText(value) {
+            searchText = String(value ?? '');
+        },
+        _queueModeVisibilitySync() {
+            queuedVisibilitySync = true;
+        },
+    });
+
+    await extension._submitAiPrompt();
+
+    assert.equal(searchText, '_');
+    assert.deepEqual(messages, [['You', 'ask ai']]);
+    assert.deepEqual(responses, ['ask ai']);
+    assert.equal(queuedVisibilitySync, true);
+    assert.equal(extension._hasAiInteraction, true);
+    assert.equal(extension._hasAiInputSentinel, true);
+    assert.equal(extension._isSubmitting, false);
+
+    console.log('[PASS] AI mode keeps a sentinel input for answer visibility');
+})().catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+});

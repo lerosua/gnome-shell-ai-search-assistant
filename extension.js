@@ -9,6 +9,7 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import { AiView } from './aiView.js';
 
 const AI_PLACEHOLDER_TEXT = 'Ask AI Assistant';
+const AI_INPUT_SENTINEL = '_';
 const SEARCH_ICON_NAME = 'edit-find-symbolic';
 const AI_ICON_FILENAME = 'ai-search-symbolic.svg';
 const TOGGLE_AI_MODE_KEYBINDING = 'toggle-ai-mode';
@@ -37,6 +38,7 @@ export default class AiSearchAssistantExtension extends Extension {
         this._isSubmitting = false;
         this._isUpdatingSearchText = false;
         this._hasAiInteraction = false;
+        this._hasAiInputSentinel = false;
         this._previousSearchActive = null;
         this._modeVisibilityIdleId = null;
         this._focusSearchIdleId = null;
@@ -252,6 +254,7 @@ export default class AiSearchAssistantExtension extends Extension {
                 this._icon.remove_style_class_name('active');
             this._setEntryIcon(null);
             this._setSearchPlaceholder(this._originalSearchPlaceholder);
+            this._restoreSearchEntryForSearchMode();
             this._restoreOverviewSearchActive();
             debugLog('AI Search Assistant: Switched to Search Mode');
         }
@@ -345,12 +348,11 @@ export default class AiSearchAssistantExtension extends Extension {
 
         this._aiView.addMessage('You', prompt);
 
-        this._setSearchEntryText('');
+        this._setAiInputSentinel();
 
         // GNOME Shell's search controller reacts to text changes and hides
-        // the search results container when the entry becomes empty.  Since
-        // aiView lives inside that container we must re-assert visibility
-        // after the search controller has finished processing the empty text.
+        // the search results container when the entry becomes empty. Keep a
+        // sentinel character in the entry so aiView can remain visible.
         this._queueModeVisibilitySync();
 
         try {
@@ -414,7 +416,37 @@ export default class AiSearchAssistantExtension extends Extension {
     }
 
     _extractPromptFromInput(text) {
-        return String(text ?? '').trim();
+        const prompt = String(text ?? '').trim();
+        if (this._isAiMode && this._hasAiInputSentinel && prompt.startsWith(AI_INPUT_SENTINEL))
+            return prompt.slice(AI_INPUT_SENTINEL.length).trim();
+
+        return prompt;
+    }
+
+    _setAiInputSentinel() {
+        this._hasAiInputSentinel = true;
+        this._setSearchEntryText(AI_INPUT_SENTINEL);
+    }
+
+    _restoreSearchEntryForSearchMode() {
+        if (!this._hasAiInputSentinel)
+            return;
+
+        const currentText = this._getSearchEntryText();
+        const restoredText = this._stripAiInputSentinel(currentText);
+        if (restoredText !== currentText)
+            this._setSearchEntryText(restoredText);
+        this._hasAiInputSentinel = false;
+    }
+
+    _stripAiInputSentinel(text) {
+        const value = String(text ?? '');
+        if (value === AI_INPUT_SENTINEL)
+            return '';
+        if (value.startsWith(AI_INPUT_SENTINEL))
+            return value.slice(AI_INPUT_SENTINEL.length);
+
+        return value;
     }
 
     _captureSearchActiveBeforeAiMode() {
@@ -710,8 +742,10 @@ export default class AiSearchAssistantExtension extends Extension {
     disable() {
         debugLog('AI Search Assistant: Disabling...');
 
-        if (this._isAiMode)
+        if (this._isAiMode) {
+            this._restoreSearchEntryForSearchMode();
             this._restoreOverviewSearchActive();
+        }
 
         if (this._stageSignal) {
             if (global.stage)
@@ -803,6 +837,7 @@ export default class AiSearchAssistantExtension extends Extension {
         this._isSubmitting = false;
         this._isUpdatingSearchText = false;
         this._hasAiInteraction = false;
+        this._hasAiInputSentinel = false;
         this._previousSearchActive = null;
         this._modeVisibilityIdleId = null;
         this._focusSearchIdleId = null;
